@@ -85,11 +85,6 @@ def test_without_tensorrt_or_display():
     assert any("estimated" in n for n in r["notes"])
 
 
-def test_busy_card_note():
-    assert any("busy" in n for n in pick(busy=85)["notes"])
-    assert not any("busy" in n for n in pick(busy=3)["notes"])
-
-
 def test_hdr_off_from_before_gets_auto():
     r = pick(current={"hdr": "off"}, hdr_display=True)
     assert r["settings"]["hdr"] == "auto" and "stays HDR all the way" in r["reasons"]["hdr"]
@@ -105,3 +100,8 @@ def test_hdr_choices_made_on_purpose_are_kept():
     # without an NVIDIA card (DirectML), SmoovPlay's HDR doesn't work yet: nothing suggested
     r = recommend({**DEFAULTS, "hdr": "off"}, timing(30.0, 20.0, "dml"), UW120, trt=False, hdr_display=True)
     assert "hdr" not in r["settings"]
+
+
+def test_busy_card_note():
+    assert any("busy" in n for n in pick(busy=85)["notes"])
+    assert not any("busy" in n for n in pick(busy=3)["notes"])
