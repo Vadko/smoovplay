@@ -83,7 +83,7 @@ There's nothing to install on the console, and it's free and open source.
 | **PC** | Windows 10 or 11 (64-bit), 8 GB of memory, 12 GB free during setup |
 | **Graphics card** | NVIDIA GeForce RTX 30, 40 or 50 series. AMD Radeon and Intel Arc as an Experimental option. |
 | **Console** | A PS5 with Remote Play turned on. Or, Experimental: a console through a capture card, or a game streamed to an app on this PC. |
-| **Network** | Ethernet for the console and the PC, or 5 GHz Wi-Fi (not needed with a capture card) |
+| **Network** | Ethernet for the console and the PC, or 5 GHz or 6 GHz Wi-Fi (not needed with a capture card) |
 | **Screen** | Any: 60 Hz gets 60 fps, 90 Hz gets 90, 120 Hz or faster gets up to 120. G-Sync or FreeSync helps. |
 
 **1. Install.** Download `SmoovPlay-Setup.exe` from [Releases](https://github.com/smoovplay/smoovplay/releases/latest)

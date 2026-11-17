@@ -55,7 +55,7 @@ Setup opens with the PC check, and the launcher's **PC check** page shows the sa
 | Disk space | Free space on the install drive (about 12 GB needed). | Warning here. The folder step blocks Install until another drive is chosen. |
 | Download servers | python.org, bootstrap.pypa.io, pypi.org, files.pythonhosted.org, download.pytorch.org and pypi.nvidia.com, through Windows' proxy settings. | All unreachable: fail. Some: warning. A system proxy is passed to pip (`--proxy`). |
 | Display | The fastest refresh rate a monitor is set to, and the fastest it could be set to. | Set below what it supports: **Open display settings**. A 60 Hz monitor is fine (info). |
-| Home network | Wired or Wi-Fi; on Wi-Fi, the band (from `netsh wlan`). | 2.4 GHz: warning, suggesting 5 GHz or a cable. |
+| Home network | Wired or Wi-Fi; on Wi-Fi, the band, 2.4, 5 or 6 GHz (from `netsh wlan`). | 2.4 GHz: warning, suggesting 5 or 6 GHz or a cable. |
 
 The folder step also checks the folder:
 

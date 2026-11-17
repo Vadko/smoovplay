@@ -101,7 +101,7 @@ namespace SmoovPlay
                 case "vc": c.Set(Level.Fail, "Not installed", "PyTorch needs it. One click installs it from Microsoft.").WithFix("Install it for me", "vc"); break;
                 case "driver": c.Set(Level.Warn, "551.86", $"Works, but {GoodDriver} or newer is recommended (and needed for RTX 50 cards).").WithFix("Get the driver", "driver"); break;
                 case "display": c.Set(Level.Warn, "2560×1440 at 60 Hz", "It can run at 144 Hz, but Windows has it at 60 Hz. Raise it for smoother play.").WithFix("Open display settings", "display"); break;
-                case "lan": c.Set(Level.Warn, "Wi-Fi, 2.4 GHz", "2.4 GHz often stutters. Use your router's 5 GHz network, or a cable."); break;
+                case "lan": c.Set(Level.Warn, "Wi-Fi, 2.4 GHz", "2.4 GHz often stutters. Use your router's 5 GHz or 6 GHz network, or a cable."); break;
                 case "net": c.Set(Level.Fail, "No connection", "Setup needs the internet. Check the connection, then check again."); break;
             }
         }
@@ -424,7 +424,7 @@ namespace SmoovPlay
         /// <summary>Wired or Wi-Fi: Remote Play is much steadier over a cable.</summary>
         static void Lan(Check c)
         {
-            c.Tip = "Remote Play is smoothest with the PC and the PS5 both wired to the router. On Wi-Fi, use 5 GHz and stay close to the router.";
+            c.Tip = "Remote Play is smoothest with the PC and the PS5 both wired to the router. On Wi-Fi, use 5 GHz or 6 GHz and stay close to the router.";
             var up = NetworkInterface.GetAllNetworkInterfaces()
                 .Where(n => n.OperationalStatus == OperationalStatus.Up &&
                             n.NetworkInterfaceType != NetworkInterfaceType.Loopback && n.NetworkInterfaceType != NetworkInterfaceType.Tunnel)
@@ -438,10 +438,11 @@ namespace SmoovPlay
             }
             if (up.Any(n => n.NetworkInterfaceType == NetworkInterfaceType.Wireless80211))
             {
-                int ch = WifiChannel();
-                if (ch > 14) c.Set(Level.Info, "Wi-Fi, 5 GHz", "Works. A cable to the router is steadier still.");
-                else if (ch > 0) c.Set(Level.Warn, "Wi-Fi, 2.4 GHz", "2.4 GHz often stutters. Use your router's 5 GHz network, or a cable.");
-                else c.Set(Level.Info, "Wi-Fi", "Works. Use 5 GHz, or a cable to the router for the steadiest stream.");
+                string band = WifiBand();
+                if (band == "6") c.Set(Level.Info, "Wi-Fi, 6 GHz", "Works well. A cable to the router is steadier still.");
+                else if (band == "5") c.Set(Level.Info, "Wi-Fi, 5 GHz", "Works. A cable to the router is steadier still.");
+                else if (band == "2.4") c.Set(Level.Warn, "Wi-Fi, 2.4 GHz", "2.4 GHz often stutters. Use your router's 5 GHz or 6 GHz network, or a cable.");
+                else c.Set(Level.Info, "Wi-Fi", "Works. Use 5 GHz or 6 GHz, or a cable to the router for the steadiest stream.");
                 return;
             }
             c.Set(Level.Info, up[0].NetworkInterfaceType.ToString(), "Remote Play is steadiest on a wired connection.");
@@ -464,7 +465,10 @@ namespace SmoovPlay
             else c.Set(Level.Ok, names[0], names.Count > 1 ? $"And {names.Count - 1} more." : "Found.");
         }
 
-        static int WifiChannel()
+        /// <summary>"2.4", "5" or "6" for the band the Wi-Fi is connected on, or null if unknown. Windows 11 prints a
+        /// "Band : 6 GHz" line (the label is translated, the value isn't); older Windows only has the channel. The channel
+        /// alone can't tell 6 GHz apart (its channels are numbered 1 to 233 again), so it's only the fallback.</summary>
+        static string WifiBand()
         {
             try
             {
@@ -473,11 +477,15 @@ namespace SmoovPlay
                 {
                     string text = pr.StandardOutput.ReadToEnd();
                     pr.WaitForExit(3000);
+                    var b = Regex.Match(text, @":\s*(2[.,]4|5|6)\s*GHz\s*$", RegexOptions.Multiline | RegexOptions.IgnoreCase);
+                    if (b.Success) return b.Groups[1].Value.Replace(',', '.');
                     var m = Regex.Match(text, @"^\s*(Channel|Kanal|Canal|Canale)\s*:\s*(\d+)", RegexOptions.Multiline | RegexOptions.IgnoreCase);
-                    return m.Success ? int.Parse(m.Groups[2].Value) : 0;
+                    if (!m.Success) return null;
+                    int ch = int.Parse(m.Groups[2].Value);
+                    return ch > 14 ? "5" : ch > 0 ? "2.4" : null;
                 }
             }
-            catch (Exception) { return 0; }
+            catch (Exception) { return null; }
         }
 
         // ---------------------------------------------------------------- the install folder
