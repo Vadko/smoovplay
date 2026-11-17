@@ -69,7 +69,7 @@ There's nothing to install on the console, and it's free and open source.
 | **NVIDIA GeForce RTX 30, 40 and 50 series** | **Tested** on an RTX 4070 Ti SUPER. RTX 20 cards and laptops aren't tested yet. |
 | **Xbox and other streaming apps**, by capturing the app's window | *Experimental.* Tested with a stand-in window, not the Xbox app yet. |
 | **Any console over HDMI**, through a capture card | *Experimental.* Tested with recordings standing in for a card. |
-| **HDR** from a PS5 (from 0.2.0) | *Experimental.* Tested with a stand-in HDR stream, not a real PS5 yet. HDR output not yet on an HDR screen. |
+| **HDR** from a PS5 (from 0.2.0) | *Experimental.* Tested with a real PS5 HDR stream on an HDR monitor. On by itself (Auto) when Windows' HDR is on. Not yet with a capture card. |
 | **AMD Radeon and Intel Arc**, through DirectML | *Experimental.* The same frames, about 1.7× more slowly. Not on a real card yet. |
 
 ## Get it
@@ -174,11 +174,12 @@ The timeline shows 90 fps. At 60 fps there's one AI frame between each pair of r
   wait every frame generator has: each real frame is held back while the in-between frames before it are shown.
   Press **L** in the video window to measure your setup.
 - **1080p.** Remote Play arrives at 1080p, so the picture is a little softer than HDMI straight from the console.
-- **HDR** (*Experimental*, from 0.2.0: Settings → HDR, off by default). For a PS5 streaming in HDR: pick the H.265
-  HDR codec in chiaki-ng, then turn HDR on. **On, shown in SDR** gives the stream its real colours on any monitor.
-  **On, HDR output** keeps it HDR all the way to a monitor with Windows' HDR on, with Looks and RTX VSR off. Both
-  have been tried with a stand-in for a PS5's HDR stream, not a real one yet, and HDR output has been checked by
-  reading back the 10-bit picture it sends, not on an HDR screen. Instant replay clips are saved in SDR either way.
+- **HDR** (*Experimental*, from 0.2.0: Settings → HDR, **Auto** by default). With **Use HDR** on in Windows'
+  display settings, SmoovPlay picks chiaki-ng's H.265 HDR codec by itself and keeps a PS5's HDR all the way to your
+  monitor, with Looks and RTX VSR off; on any other display it asks the PS5 for SDR. Turn on HDR on the PS5 too
+  (Settings → Screen and Video → Video Output → HDR). **On, shown in SDR** fits an HDR stream to any monitor, and
+  **Off** leaves chiaki-ng's codec as you set it. Tried with a real PS5 HDR stream on an HDR monitor (Windows 11, RTX
+  5070 Ti); not yet with a capture card, which stays SDR. Instant replay clips are saved in SDR either way.
 - **Some wobble.** HUD text over fast motion, very fast camera turns and thin objects crossing each other can wobble
   a little. Press **I** to compare with frame generation off.
 - **Sound stays in step.** chiaki-ng holds the sound back by as long as the picture spends in SmoovPlay.

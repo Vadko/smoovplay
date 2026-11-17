@@ -1,4 +1,6 @@
-"""HDR from PS5 Remote Play: settings "hdr" (off by default; with it off nothing here runs).
+"""HDR from PS5 Remote Play: settings "hdr" (Auto by default: HDR output on a display with Windows' HDR on, "sdr" on
+any other; framegen/chiaki_settings.py picks chiaki-ng's codec to match). With it off, or a stream without HDR,
+nothing here runs.
 
 A PS5 streaming in HDR (chiaki-ng's H.265 HDR codec) sends 10-bit H.265 in HDR10: BT.2020 colours and PQ (SMPTE
 ST 2084) brightness, up to 10,000 nits. The rest of SmoovPlay works on 8-bit SDR frames, where that comes out washed

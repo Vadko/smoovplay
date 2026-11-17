@@ -278,8 +278,9 @@ def main() -> int:
                     help="vsync the window (use with G-Sync/FreeSync displays)")
     ap.add_argument("--fullscreen", action=argparse.BooleanOptionalAction, default=None, help="start fullscreen")
     ap.add_argument("--hdr", default=None, choices=BY_KEY["hdr"].choices,
-                    help="an HDR stream from PS5 Remote Play: off (as before), sdr (tone-mapped to SDR) or hdr10 (HDR "
-                         "output, Experimental: an HDR display with Windows' HDR on). Default: the saved setting")
+                    help="an HDR stream from PS5 Remote Play: auto (hdr10 on a display with Windows' HDR on, sdr on any "
+                         "other), off (as before), sdr (tone-mapped to SDR) or hdr10 (HDR output, Experimental: an HDR "
+                         "display with Windows' HDR on). Default: the saved setting")
     ap.add_argument("--present", default=None, choices=BY_KEY["present"].choices,
                     help="how the window presents: gl = OpenGL's own, dxgi = DXGI flip model (Experimental: less "
                          "delay in a window, G-Sync in a window). Default: the saved setting")
@@ -331,6 +332,15 @@ def main() -> int:
     test = TestMode(a.test_mode) if kind in ("chiaki", "capture", "tap") or (kind == "file" and a.raw) else None
     if a.test_mode and test is None:
         ap.error("--test-mode needs Remote Play, a capture card, the frame tap, or a video file with --raw")
+    settings = Settings() if a.settings.lower() == "none" else Settings.load(Path(a.settings))
+    for key, value in (("hz", a.hz), ("scaler", a.scaler), ("vsr_quality", a.vsr_quality),
+                       ("fsr_sharpness", a.fsr_sharpness), ("engine", "trt" if a.trt else a.engine),
+                       ("interp", False if a.off else None), ("vsync", a.vsync), ("fullscreen", a.fullscreen),
+                       ("minimize_chiaki", a.minimize_chiaki), ("simulate_30", True if a.test_mode else None),
+                       ("steady_hud", a.steady_hud), ("vfg_quality", a.vfg_quality), ("present", a.present),
+                       ("hdr", a.hdr)):
+        if value is not None:
+            settings.override(key, value)
     if kind == "tap":
         from framegen.tap import DEFAULT_NAME, open_tap
         try:  # compressed frames come through the same reader as chiaki-ng's, so they count as "chiaki" from here
@@ -343,6 +353,9 @@ def main() -> int:
             test = None
     elif kind == "chiaki":
         from framegen.chiaki_tap import NAME, ChiakiSource
+        if not a.chiaki_tap:  # chiaki-ng itself (tests use another tap): its codec, before it starts a stream
+            from framegen.chiaki_settings import match_codec
+            match_codec(settings.hdr, nvidia=not dml_mode)
         src = ChiakiSource(a.chiaki_decoder, wait_s=600, log_path=a.chiaki_log, tap_name=a.chiaki_tap or NAME,
                            test=test)
     elif kind == "capture":
@@ -367,15 +380,6 @@ def main() -> int:
         ap.error("give a video file, --capture N or --chiaki")
     print(f"[run] source: {src.info.name}")
 
-    settings = Settings() if a.settings.lower() == "none" else Settings.load(Path(a.settings))
-    for key, value in (("hz", a.hz), ("scaler", a.scaler), ("vsr_quality", a.vsr_quality),
-                       ("fsr_sharpness", a.fsr_sharpness), ("engine", "trt" if a.trt else a.engine),
-                       ("interp", False if a.off else None), ("vsync", a.vsync), ("fullscreen", a.fullscreen),
-                       ("minimize_chiaki", a.minimize_chiaki), ("simulate_30", True if a.test_mode else None),
-                       ("steady_hud", a.steady_hud), ("vfg_quality", a.vfg_quality), ("present", a.present),
-                       ("hdr", a.hdr)):
-        if value is not None:
-            settings.override(key, value)
     # --model: one of the settings' choices, or another RIFE version for testing (not something the menu offers)
     test_model = a.model if a.model is not None and a.model not in BY_KEY["model"].choices else None
     if a.model is not None and test_model is None:
@@ -391,13 +395,14 @@ def main() -> int:
     # HDR (framegen/hdr.py, settings "hdr"): only for a PS5 Remote Play stream in HDR, and only with the setting on;
     # otherwise nothing below changes. hdr_out: what the stream's frames become ("sdr8": tone-mapped to SDR; "pq16":
     # kept HDR10, for HDR output), or None. hdr10[0]: the pipeline carries HDR10 frames (half floats) to the window.
+    # Auto is HDR output on a display with Windows' HDR on, and shown in SDR on any other.
     hdr_out, hdr_why, hdr_peak = None, "", None
     if kind == "chiaki" and settings.hdr != "off" and getattr(src, "hdr_stream", False):
         if dml_mode:
             hdr_why = "SmoovPlay's HDR needs an NVIDIA card for now"
         else:
             hdr_out = "sdr8"
-            if settings.hdr == "hdr10":
+            if settings.hdr in ("hdr10", "auto"):
                 from framegen.dxgi_present import HDR_FORCE, display_hdr
                 shown = display_hdr()
                 if not a.display or a.display_cv or a.out:
@@ -409,6 +414,8 @@ def main() -> int:
                     print("[run] HDR output: HDR10"
                           + (f" to a display that goes to about {hdr_peak:.0f} nits" if hdr_peak else "")
                           + (" (testing: FRAMEGEN_HDR_FORCE)" if HDR_FORCE else ""))
+                elif settings.hdr == "auto":
+                    print("[run] HDR stream: shown in SDR, as this display doesn't have Windows' HDR on")
                 else:
                     print("[run] HDR output: this display doesn't have Windows' HDR on (Settings > System > Display > "
                           "Use HDR), so HDR is shown in SDR")
@@ -536,6 +543,9 @@ def main() -> int:
         unavailable.setdefault("model", "NVIDIA VFG needs an NVIDIA RTX card.")
     choices = {"engine": ("auto", "trt", "torch") if has_trt else ("auto", "torch"),
                "model": tuple(m for m in BY_KEY["model"].choices if m != "vfg" or not vfg_why[0])}
+    from framegen.settings import system_limits
+    for key, why_not in system_limits().items():  # e.g. HDR output without Windows' HDR on
+        choices[key] = tuple(c for c in choices.get(key, BY_KEY[key].choices) if c not in why_not)
     if a.out:
         choices["hz"] = (60,)
         unavailable["hz"] = "90/120 fps can't be recorded with --out yet."
