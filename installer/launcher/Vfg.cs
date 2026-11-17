@@ -21,7 +21,7 @@ namespace SmoovPlay
     partial class Ui
     {
         Dictionary<string, object> vfgStatus;  // framegen.vfg_setup --status; null until it's read
-        bool vfgLoading, vfgWorking, vfgCancelled;
+        bool vfgLoading, vfgWorking, vfgCancelled, vfgThenDetect;
         string vfgLine, vfgError;
         Process vfgProc;
         StackPanel vfgBox;  // under the Interpolation model row
@@ -62,6 +62,7 @@ namespace SmoovPlay
                     if (st != null) vfgStatus = st;
                     RefreshSettings();
                     BuildChips();
+                    if (detectResult != null && !detecting) RenderDetect();  // Auto-detect's offer to set it up
                 });
             });
         }
@@ -140,7 +141,11 @@ namespace SmoovPlay
             return d;
         }
 
-        void AskSetUpVfg()
+        void AskSetUpVfg() { AskSetUpVfg(false); }
+
+        /// <summary>thenDetect: asked from Auto-detect's offer (AutoDetect.cs), so Auto-detect runs again once it's set
+        /// up, times it and suggests it if it keeps up.</summary>
+        void AskSetUpVfg(bool thenDetect)
         {
             var licences = VfgLicences();
             Ask("\uE946", "Accent", "Set up NVIDIA VFG",
@@ -149,23 +154,25 @@ namespace SmoovPlay
                 + "allow publishing VFG's speed or quality results, so SmoovPlay keeps them out of Copy diagnostics.",
                 "Accept and download", "Read the licence", "Cancel", r =>
                 {
-                    if (r == 1) StartVfgInstall();
+                    if (r == 1) StartVfgInstall(thenDetect);
                     else if (r == 2)
                     {
                         foreach (var url in licences.Values) Proc.Open(url);
-                        AskSetUpVfg();  // back to the question once they've read it
+                        AskSetUpVfg(thenDetect);  // back to the question once they've read it
                     }
                 });
         }
 
-        void StartVfgInstall()
+        void StartVfgInstall(bool thenDetect)
         {
             if (vfgWorking) return;
             vfgWorking = true;
+            vfgThenDetect = thenDetect;
             vfgCancelled = false;
             vfgError = null;
             vfgLine = "Starting the download";
             RenderVfg();
+            if (detectResult != null) RenderDetect();  // its offer's button: "Setting up..."
             string log = Path.Combine(paths.Logs, "vfg-setup.txt");
             string tmp = Path.Combine(paths.Runtime, "tmp-vfx");  // pip's download goes on the install drive, not C:\...\Temp
             Task.Run(() =>
@@ -213,9 +220,14 @@ namespace SmoovPlay
                     if (vfgCancelled) vfgError = null;
                     else if (rc == 0)
                     {
-                        // Offered, not switched to: RIFE stays picked until they choose VFG. Not while playing: the
-                        // running session started without VFG.
-                        if (SettingText("model") == "vfg") Toast("NVIDIA VFG is set up", false);
+                        // Offered, not switched to: RIFE stays picked until they choose VFG (or apply Auto-detect's
+                        // suggestion). Not while playing: the running session started without VFG.
+                        if (vfgThenDetect && !SessionRunning && !detecting)
+                        {
+                            Toast("NVIDIA VFG is set up. Auto-detect is timing it now", false);
+                            RunDetect();
+                        }
+                        else if (SettingText("model") == "vfg") Toast("NVIDIA VFG is set up", false);
                         else if (SessionRunning) Toast("NVIDIA VFG is set up. Pick it under Interpolation model once you stop playing", false);
                         else Toast("NVIDIA VFG is set up. RIFE 4.22 lite stays picked until you switch", false, "Use it now", UseVfgNow);
                     }

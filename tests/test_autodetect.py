@@ -1,5 +1,7 @@
 """Auto-detect's choices (framegen.autodetect.recommend) for made-up PCs. No GPU needed."""
-from framegen.autodetect import Display, recommend
+import re
+
+from framegen.autodetect import Display, recommend, vfg_offer
 from framegen.settings import BY_KEY, SPECS
 
 DEFAULTS = {s.key: s.default for s in SPECS}
@@ -88,3 +90,24 @@ def test_without_tensorrt_or_display():
 def test_busy_card_note():
     assert any("busy" in n for n in pick(busy=85)["notes"])
     assert not any("busy" in n for n in pick(busy=3)["notes"])
+
+
+def test_rtx_40_and_50_cards_without_vfg_are_offered_it():
+    text = vfg_offer(True, "NVIDIA GeForce RTX 5070 Ti", "621.24")
+    assert text.startswith("Your RTX 5070 Ti can also run NVIDIA VFG")
+    assert "NVIDIA's licence" in text and "Auto-detect times it" in text
+    assert "driver" not in text  # new enough
+    assert not re.search(r"\d ?ms\b", text) and "faster" not in text  # NVIDIA's licence: no speed or quality claims
+
+
+def test_vfg_offer_asks_for_a_newer_driver_first():
+    assert "570.65 or newer, and this PC has 566.36" in vfg_offer(True, "NVIDIA GeForce RTX 4070", "566.36")
+    assert "driver" not in vfg_offer(True, "NVIDIA GeForce RTX 4070", "570.65")
+    assert "driver" not in vfg_offer(True, "NVIDIA GeForce RTX 4070", None)  # unknown: VFG itself will say
+    assert "driver" not in vfg_offer(True, "NVIDIA GeForce RTX 4070", "r570")
+
+
+def test_no_vfg_offer_when_set_up_or_the_card_cant_run_it():
+    # not_set_up is False when it's set up, on RTX 20/30 cards, without an NVIDIA card, or when the check failed
+    assert vfg_offer(False, "NVIDIA GeForce RTX 3080", "621.24") == ""
+    assert vfg_offer(False, "NVIDIA GeForce RTX 5070 Ti", "621.24") == ""

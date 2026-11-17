@@ -414,6 +414,31 @@ def _notes(notes: list, settings: dict, *, display: Display | None, hz: int, rat
         assert v in BY_KEY[k].choices, (k, v)
 
 
+VFG_MIN_DRIVER = (570, 65)  # NVIDIA VFG's oldest driver (framegen/vfg.py)
+
+
+def vfg_offer(not_set_up: bool, gpu: str, driver: str | None) -> str:
+    """What Auto-detect says about setting up NVIDIA VFG, or "" for nothing. Said when the graphics card can run it
+    (an RTX 40 or 50 series card: not_set_up is vfg_unavailable() == NOT_SET_UP) and it isn't set up. It's NVIDIA's
+    own download, under NVIDIA's licence, so setting it up is the player's choice, but they should know their card can
+    run it; the launcher puts a button to set it up next to this. Once it's set up, Auto-detect times it and suggests
+    it if it keeps up (recommend()). No speed or quality claims: NVIDIA's licence forbids publishing VFG's results."""
+    if not not_set_up:
+        return ""
+    name = gpu.replace("NVIDIA ", "").replace("GeForce ", "").strip() or "graphics card"
+    text = (f"Your {name} can also run NVIDIA VFG, NVIDIA's own frame generation, in place of RIFE. It's a separate "
+            "download from NVIDIA, under NVIDIA's licence. Set it up, and Auto-detect times it and suggests it if it "
+            "keeps up on this PC.")
+    try:
+        old = bool(driver) and tuple(int(x) for x in driver.split(".")[:2]) < VFG_MIN_DRIVER
+    except ValueError:  # a driver version in another form: leave it to VFG itself
+        old = False
+    if old:
+        text += (f" It needs NVIDIA driver {VFG_MIN_DRIVER[0]}.{VFG_MIN_DRIVER[1]} or newer, and this PC has {driver}: "
+                 "update it first (see the PC check).")
+    return text
+
+
 def detect(current: dict, log: Callable[[str], None] = print, timing: dict | None = None,
            vfg: dict | None = None) -> dict:
     """The whole test: what was found ("found": label/value/detail rows for the launcher) plus recommend()'s result.
@@ -483,8 +508,11 @@ def detect(current: dict, log: Callable[[str], None] = print, timing: dict | Non
         result["found"].append({"label": "NVIDIA VFG",
                                 "value": "Set up" if not vfg_why else "Not set up" if vfg_why == NOT_SET_UP
                                 else "Not available",
-                                "detail": "" if not vfg_why else "Optional: see Interpolation model, below."
-                                if vfg_why == NOT_SET_UP else vfg_why})
+                                "detail": "" if not vfg_why else "Optional: see below." if vfg_why == NOT_SET_UP
+                                else vfg_why})
+        offer = vfg_offer(vfg_why == NOT_SET_UP, gpu, smi.get("driver"))
+        if offer:
+            result["vfg_offer"] = offer  # the launcher shows it with a button that sets VFG up
     result["timing"] = timing
     result["vfg_timing"] = vfg
     result["busy"] = smi.get("busy")
