@@ -135,7 +135,7 @@ made-up PCs.
 | RTX VSR quality | Low / Medium / High / Ultra | live |
 | Stats overlay, Fullscreen, VSync | On / Off | live |
 | Stats overlay style | Minimal (frames on screen, the game's rate, the delay, a keeping-up dot) / Detailed | live |
-| Window presentation | Standard / Low delay (Experimental: DXGI flip model, so a window skips the compositor's copy and G-Sync works in a window; fullscreen always uses Standard; `--present gl\|dxgi`) | next Play |
+| Window presentation | Standard / Low delay (Experimental: DXGI flip model, so a window skips the compositor's copy and G-Sync works in a window; fullscreen uses Standard; `--present gl\|dxgi`). With Windows' HDR on for the main display it's always DXGI, fullscreen as a borderless window: OpenGL's own fullscreen switches the display to SDR while it's in front (`FRAMEGEN_KEEP_HDR=0` turns this off) | next Play |
 | Minimise chiaki-ng | On / Off | live (PS5 Remote Play only) |
 | Sound in sync | On / Off (chiaki-ng holds its sound back to meet the picture) | live (PS5 Remote Play only) |
 | Simulate a 30 fps game | Off / On | live, this session only, never saved (any 60 Hz source: Remote Play, a capture card, or a file with `--raw`; `--test-mode`) |
@@ -310,7 +310,9 @@ Timing from a recorded clip, not a live stream, paced at 60 Hz with the OpenGL w
 - **Packaging**: the installer is unsigned ([SmartScreen warns](../README.md#smartscreen)) and
   about 140 MB, because chiaki-ng is embedded. The launcher updates itself from GitHub releases.
 - In a window, Standard presentation goes through the Windows compositor, which adds about 12 ms. Fullscreen (`f`)
-  avoids it, and so does Window presentation: Low delay (Experimental), in a window too.
+  avoids it, and so does Window presentation: Low delay (Experimental), in a window too. With Windows' HDR on, the
+  window always presents through DXGI and fullscreen is a borderless window, so the display stays in HDR (OpenGL's
+  own fullscreen switched it to SDR while the window was in front, and the colours changed with every Alt+Tab).
 </details>
 
 

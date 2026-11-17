@@ -199,9 +199,9 @@ SPECS: tuple[Spec, ...] = (
                 "dxgi": "Hands frames over the way games do, so a window is about as quick as fullscreen and G-Sync "
                         "works. Experimental."},
          help="How the video reaches the screen. In a window, Standard goes through the Windows compositor, which "
-              "adds about 12 ms and keeps G-Sync and FreeSync from working (fullscreen doesn't). Low delay hands "
-              "frames over the way games do, for playing in a window; fullscreen always uses Standard, which is "
-              "already as quick there. Experimental; applies the next time you press Play.",
+              "adds about 12 ms and keeps G-Sync and FreeSync from working. Low delay hands frames over the way games "
+              "do, for playing in a window; fullscreen uses Standard, as quick there. With Windows' HDR on, it's always "
+              "Low delay, so fullscreen keeps HDR on. Experimental; applies the next time you press Play.",
          impact={"speed": "Low delay should save the 12 ms a window adds. Still being measured."}),
     Spec("overlay", "Stats overlay", (True, False), True, ON_OFF, group="Display",
          help="Numbers in a corner of the video: how many frames a second are on screen, the game's own frame rate, "
