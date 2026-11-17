@@ -237,9 +237,11 @@ namespace SmoovPlay
                 body.Children.Add(g);
             }
 
+            // (Also not once VFG is set up, or when its own setup check says this PC can't run it.)
             string offer = detectResult.ContainsKey("vfg_offer") ? detectResult["vfg_offer"] as string : null;
-            if (!string.IsNullOrEmpty(offer) && !VfgInstalled)
-                body.Children.Add(VfgOffer(offer));
+            object ready = detectResult.ContainsKey("vfg_offer_ready") ? detectResult["vfg_offer_ready"] : null;
+            if (!string.IsNullOrEmpty(offer) && !VfgInstalled && VfgUnsupported.Length == 0)
+                body.Children.Add(VfgOffer(offer, !(ready is bool) || (bool)ready));  // false: the driver is too old
 
             var buttons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0) };
             if (detectApplied)
@@ -265,7 +267,7 @@ namespace SmoovPlay
         /// <summary>Auto-detect's offer to set up NVIDIA VFG (framegen/autodetect.py vfg_offer: an RTX 40 or 50 series card
         /// without it), with a button for it. Setting it up from here runs Auto-detect again (Vfg.cs), which then times
         /// VFG and suggests it if it keeps up.</summary>
-        FrameworkElement VfgOffer(string text)
+        FrameworkElement VfgOffer(string text, bool driverOk)
         {
             var g = new Grid { Margin = new Thickness(0, 4, 0, 8) };
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -278,8 +280,9 @@ namespace SmoovPlay
             g.Children.Add(t);
             var b = DetectButton("BtnDetectVfg", "Secondary", vfgWorking ? "Setting up..." : "Set up NVIDIA VFG", () => AskSetUpVfg(true), new Thickness(12, 0, 0, 0));
             b.VerticalAlignment = VerticalAlignment.Center;
-            b.IsEnabled = vfgStatus != null && !vfgWorking;
-            if (vfgStatus == null) b.ToolTip = "Checking whether NVIDIA VFG is set up";
+            b.IsEnabled = vfgStatus != null && !vfgWorking && driverOk;
+            if (!driverOk) b.ToolTip = "Update the NVIDIA driver first (see the PC check), then run Auto-detect again";
+            else if (vfgStatus == null) b.ToolTip = "Checking whether NVIDIA VFG is set up";
             ToolTipService.SetShowOnDisabled(b, true);
             Grid.SetColumn(b, 2);
             g.Children.Add(b);

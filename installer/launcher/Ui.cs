@@ -1601,6 +1601,7 @@ namespace SmoovPlay
             }
             if (over && changed) BringBack();
             if (over && changed) { liveState = null; restartSent = false; BuildChips(); }
+            if (over && changed && detectAfterPlay && !detecting) { detectAfterPlay = false; RunDetect(); }  // (Vfg.cs)
             RefreshSettings();
             OnLooksState();
             UpdateTaskbar(st, title);

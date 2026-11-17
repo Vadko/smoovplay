@@ -429,14 +429,19 @@ def vfg_offer(not_set_up: bool, gpu: str, driver: str | None) -> str:
     text = (f"Your {name} can also run NVIDIA VFG, NVIDIA's own frame generation, in place of RIFE. It's a separate "
             "download from NVIDIA, under NVIDIA's licence. Set it up, and Auto-detect times it and suggests it if it "
             "keeps up on this PC.")
-    try:
-        old = bool(driver) and tuple(int(x) for x in driver.split(".")[:2]) < VFG_MIN_DRIVER
-    except ValueError:  # a driver version in another form: leave it to VFG itself
-        old = False
-    if old:
+    if vfg_driver_too_old(driver):
         text += (f" It needs NVIDIA driver {VFG_MIN_DRIVER[0]}.{VFG_MIN_DRIVER[1]} or newer, and this PC has {driver}: "
                  "update it first (see the PC check).")
     return text
+
+
+def vfg_driver_too_old(driver: str | None) -> bool:
+    """Whether nvidia-smi's driver version (e.g. "566.36", always two digits after the point on Windows) is older than
+    NVIDIA VFG's oldest. Unknown or in another form: False, and VFG itself says if it can't start."""
+    try:
+        return bool(driver) and tuple(int(x) for x in driver.split(".")[:2]) < VFG_MIN_DRIVER
+    except ValueError:
+        return False
 
 
 def detect(current: dict, log: Callable[[str], None] = print, timing: dict | None = None,
@@ -512,7 +517,8 @@ def detect(current: dict, log: Callable[[str], None] = print, timing: dict | Non
                                 else vfg_why})
         offer = vfg_offer(vfg_why == NOT_SET_UP, gpu, smi.get("driver"))
         if offer:
-            result["vfg_offer"] = offer  # the launcher shows it with a button that sets VFG up
+            result["vfg_offer"] = offer  # the launcher shows it with a button that sets VFG up...
+            result["vfg_offer_ready"] = not vfg_driver_too_old(smi.get("driver"))  # ...greyed out until the driver is
     result["timing"] = timing
     result["vfg_timing"] = vfg
     result["busy"] = smi.get("busy")

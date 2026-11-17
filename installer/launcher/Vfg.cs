@@ -22,6 +22,7 @@ namespace SmoovPlay
     {
         Dictionary<string, object> vfgStatus;  // framegen.vfg_setup --status; null until it's read
         bool vfgLoading, vfgWorking, vfgCancelled, vfgThenDetect;
+        bool detectAfterPlay;  // VFG was set up while playing: Auto-detect runs once play stops (OnPlayState)
         string vfgLine, vfgError;
         Process vfgProc;
         StackPanel vfgBox;  // under the Interpolation model row
@@ -222,10 +223,18 @@ namespace SmoovPlay
                     {
                         // Offered, not switched to: RIFE stays picked until they choose VFG (or apply Auto-detect's
                         // suggestion). Not while playing: the running session started without VFG.
-                        if (vfgThenDetect && !SessionRunning && !detecting)
+                        // Auto-detect again, which times it: asked for by its offer, or its results on the page are
+                        // out of date now (they say "Not set up"). While playing, once play stops (OnPlayState).
+                        bool redetect = vfgThenDetect || detectResult != null;
+                        if (redetect && !SessionRunning && !detecting)
                         {
                             Toast("NVIDIA VFG is set up. Auto-detect is timing it now", false);
                             RunDetect();
+                        }
+                        else if (redetect && SessionRunning)
+                        {
+                            detectAfterPlay = true;
+                            Toast("NVIDIA VFG is set up. Auto-detect times it once you stop playing", false);
                         }
                         else if (SettingText("model") == "vfg") Toast("NVIDIA VFG is set up", false);
                         else if (SessionRunning) Toast("NVIDIA VFG is set up. Pick it under Interpolation model once you stop playing", false);
