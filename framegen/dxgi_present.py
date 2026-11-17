@@ -449,8 +449,9 @@ class DxgiPresenter:
         self.snap_next = self.w > 0  # (testing) the first frame at the new size, after it's drawn
         self.w, self.h = w, h
 
-    def present(self, vsync: bool, check: bool = False) -> None:
-        """Copies `fbo` into the back buffer (upright) and shows it. vsync off: at once, tearing if allowed."""
+    def present(self, vsync: bool, check: bool = False, tear: bool = True) -> None:
+        """Copies `fbo` into the back buffer (upright) and shows it. vsync off: at once, tearing if allowed (and tear:
+        the caller may turn it off, e.g. in a window that never tore before)."""
         GL, handles = self.GL, (c_void_p * 1)(self.obj)
         t0 = time.perf_counter()
         if not self.wgl.lock(self.hdev, 1, handles):
@@ -471,7 +472,7 @@ class DxgiPresenter:
         self.presents += 1
         if SNAP_DIR and not check and self.snaps < SNAP_MAX and (self.snap_next or self.presents % SNAP_EVERY == 0):
             self._snap(vsync)
-        sync, flags = (1, 0) if vsync else (0, DXGI_PRESENT_ALLOW_TEARING if self.tearing else 0)
+        sync, flags = (1, 0) if vsync else (0, DXGI_PRESENT_ALLOW_TEARING if self.tearing and tear else 0)
         t0 = time.perf_counter()
         hr = _com(self.swap_chain, SWAP_CHAIN_PRESENT, [c_uint, c_uint], sync, flags)
         self._say_if_slow("Present call", t0)

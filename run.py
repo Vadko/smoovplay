@@ -549,6 +549,9 @@ def main() -> int:
             unavailable.pop(k, None)
             if window is not None:
                 window.unavailable.pop(k, None)
+        if getattr(window, "keep_hdr", False):  # on 8-bit DXGI instead, as Windows' HDR is on: "present" stays fixed
+            window.note_presentation()
+            unavailable["present"] = window.unavailable["present"]
         interp = None
         gc.collect()
         torch.cuda.empty_cache()

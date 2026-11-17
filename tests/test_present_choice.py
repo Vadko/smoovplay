@@ -6,15 +6,16 @@ from types import SimpleNamespace
 from framegen import dxgi_present, io
 
 
-def _window(monkeypatch, hdr_on, present="gl", fullscreen=True, overlay=None, dxgi_works=True):
+def _window(monkeypatch, hdr_on, present="gl", fullscreen=True, overlay=None, dxgi_works=True, hdr10_works=True):
     w = io.GLWindowSink.__new__(io.GLWindowSink)  # no GL, no window
     w.settings = SimpleNamespace(present=present, fullscreen=fullscreen)
     w.overlay_of, w.dx, w.hdr10, w.keep_hdr, w.fs_style = overlay, None, False, False, "none"
+    w._borderless = False
     opened = []
 
     def open_dxgi(width, height, hdr=False, peak=1000.0, keep_hdr=False):
         opened.append({"hdr": hdr, "keep_hdr": keep_hdr})
-        w.dx = SimpleNamespace(hdr=hdr) if dxgi_works else None
+        w.dx = SimpleNamespace(hdr=hdr) if dxgi_works and (hdr10_works or not hdr) else None
     monkeypatch.setattr(w, "_open_dxgi", open_dxgi)
     monkeypatch.setattr(io, "windows_hdr_on", lambda: hdr_on)
     monkeypatch.setattr(io, "KEEP_HDR", True)
@@ -65,6 +66,56 @@ def test_hdr_output_is_unchanged(monkeypatch):
     w._choose_presentation(1920, 1080, hdr=True, hdr_peak=800.0)
     assert opened == [{"hdr": True, "keep_hdr": False}]
     assert (w.hdr10, w.keep_hdr, w.fs_style) == (True, False, "borderless")
+
+
+def test_hdr_output_failing_still_keeps_windows_hdr_on(monkeypatch):
+    # the 10-bit HDR10 swap chain can't be made: the 8-bit one, so fullscreen still doesn't switch the display to SDR
+    w, opened = _window(monkeypatch, hdr_on=True, hdr10_works=False)
+    w._choose_presentation(1920, 1080, hdr=True, hdr_peak=800.0)
+    assert opened == [{"hdr": True, "keep_hdr": False}, {"hdr": False, "keep_hdr": True}]
+    assert (w.hdr10, w.keep_hdr, w.fs_style) == (False, True, "borderless")
+    w, opened = _window(monkeypatch, hdr_on=False, present="dxgi", fullscreen=False, hdr10_works=False)
+    w._choose_presentation(1920, 1080, hdr=True, hdr_peak=800.0)  # without Windows' HDR: Low delay, as before
+    assert opened == [{"hdr": True, "keep_hdr": False}, {"hdr": False, "keep_hdr": False}] and not w.keep_hdr
+
+
+def test_a_window_on_dxgi_for_hdr_alone_never_tears(monkeypatch):
+    w, _ = _window(monkeypatch, hdr_on=True, present="gl")
+    w._choose_presentation(1920, 1080, hdr=False, hdr_peak=1000.0)
+    assert not w._may_tear()  # a window, Standard picked: as the compositor, no tear lines
+    w._borderless = True
+    assert w._may_tear()  # fullscreen: VSync off tears, as OpenGL's fullscreen did
+    w._borderless, w.settings.present = False, "dxgi"
+    assert w._may_tear()  # Low delay picked on purpose
+    w, _ = _window(monkeypatch, hdr_on=False, present="dxgi", fullscreen=False)
+    w._choose_presentation(1920, 1080, hdr=False, hdr_peak=1000.0)
+    assert w._may_tear()
+
+
+def test_present_row_says_why_it_cant_change(monkeypatch):
+    w, _ = _window(monkeypatch, hdr_on=True)
+    w._choose_presentation(1920, 1080, hdr=False, hdr_peak=1000.0)
+    w.unavailable = {"present": "HDR output always uses the low-delay presentation."}  # run.py's, before a fallback
+    w.note_presentation()
+    assert w.unavailable["present"] == io.KEEP_HDR_REASON
+    w, _ = _window(monkeypatch, hdr_on=False)
+    w._choose_presentation(1920, 1080, hdr=False, hdr_peak=1000.0)
+    w.unavailable = {}
+    w.note_presentation()
+    assert w.unavailable == {}
+
+
+def test_fullscreen_after_windows_hdr_was_turned_on_says_so(monkeypatch):
+    w, _ = _window(monkeypatch, hdr_on=False, fullscreen=False)
+    w._choose_presentation(1920, 1080, hdr=False, hdr_peak=1000.0)  # OpenGL's own: HDR was off then
+    toasts, went = [], []
+    w.glfw, w.menu = SimpleNamespace(), SimpleNamespace(open=True)
+    w.toast = lambda text, seconds=2.0: toasts.append(text)
+    monkeypatch.setattr(w, "_set_fullscreen", went.append)
+    monkeypatch.setattr(io, "windows_hdr_on", lambda: True)  # Win+Alt+B during play
+    w.settings.fullscreen = True
+    w._apply("fullscreen")
+    assert went == [True] and toasts and "switches the display to SDR until you press Play again" in toasts[0]
 
 
 def test_fullscreen_key_goes_borderless(monkeypatch):

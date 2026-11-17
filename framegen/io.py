@@ -610,8 +610,7 @@ class GLWindowSink:
         self._bake_said = False
 
         self.choices, self.unavailable = dict(choices or {}), dict(unavailable or {})
-        if self.keep_hdr:
-            self.unavailable.setdefault("present", KEEP_HDR_REASON)
+        self.note_presentation()
         self.menu = Menu(st, allowed=self.allowed, disabled=self.disabled, restart_reasons=restart_reasons)
         self.menu_panel, self.toast_panel = _Panel(GL, self.hdr10), _Panel(GL, self.hdr10)
         self.mini_panel, self._mini_state = _Panel(GL, self.hdr10), None
@@ -729,14 +728,19 @@ class GLWindowSink:
         done (self.fs_style). DXGI for HDR output (hdr), when the main display has Windows' HDR on (KEEP_HDR), and for
         settings "present" = Low delay in a window. Window capture's overlay always draws with OpenGL."""
         st = self.settings
-        if self.overlay_of is None and (hdr or (KEEP_HDR and windows_hdr_on())):
-            self._open_dxgi(w, h, hdr=hdr, peak=hdr_peak, keep_hdr=not hdr)
+        if self.overlay_of is None:
+            hdr_on = KEEP_HDR and windows_hdr_on()
+            if hdr:
+                self._open_dxgi(w, h, hdr=True, peak=hdr_peak)
+                self.hdr10 = self.dx is not None
+            if self.dx is None and hdr_on:  # (also when HDR output's 10-bit swap chain couldn't be made: SDR, then)
+                self._open_dxgi(w, h, keep_hdr=True)
+                self.keep_hdr = self.dx is not None
             if self.dx is not None:
-                self.hdr10, self.keep_hdr = hdr, not hdr
                 # Fullscreen with this swap chain is a borderless window: GLFW's fullscreen could stall it.
                 self.fs_style = "borderless" if FULLSCREEN_STYLE == "none" else FULLSCREEN_STYLE
                 return
-            if not hdr:
+            if hdr_on:
                 return  # (it said why; Low delay would fail the same way)
         if st.present != "dxgi":
             return  # the standard presentation
@@ -747,6 +751,12 @@ class GLWindowSink:
         else:
             print("[display] fullscreen: standard presentation (Low delay is for windowed play; fullscreen already "
                   "skips the compositor)")
+
+    def note_presentation(self) -> None:
+        """The "present" row can't be changed while Windows' HDR keeps the window on DXGI (it overrides HDR output's
+        reason: keep_hdr is HDR output's fallback too). run.py puts it back if it drops HDR output's rows."""
+        if self.keep_hdr:
+            self.unavailable["present"] = KEEP_HDR_REASON
 
     def _open_dxgi(self, w: int, h: int, hdr: bool = False, peak: float = 1000.0, keep_hdr: bool = False) -> None:
         """Settings "present" = "dxgi" (Experimental): the video window gets a DXGI flip-model swap chain and no OpenGL
@@ -776,9 +786,10 @@ class GLWindowSink:
             test = ("copy", 2) != (self.dx.mode, BUFFERS) or FULLSCREEN_STYLE != "none"
             print("[display] window presentation: DXGI flip model"
                   + (", HDR10 (10-bit, PQ, BT.2020)" if hdr else "")
-                  + (", tearing allowed with VSync off" if self.dx.tearing else "")
+                  + ((", tearing allowed with VSync off" + (" in fullscreen" if keep_hdr else "")) if self.dx.tearing
+                     else "")
                   + (", as Windows' HDR is on: fullscreen keeps it on (FRAMEGEN_KEEP_HDR=0: OpenGL's own)" if keep_hdr
-                     else " (Experimental)")
+                     else "") + " (Experimental)"
                   + (f" [testing: {self.dx.mode}, {BUFFERS} buffers, fullscreen {FULLSCREEN_STYLE}]" if test else ""))
         except Exception as e:  # noqa: BLE001 - any failure: OpenGL's own presentation
             glfw.default_window_hints()
@@ -800,12 +811,17 @@ class GLWindowSink:
         """The framebuffer the picture is drawn into: the window's own, or DXGI's offscreen one."""
         return self.dx.fbo if self.dx is not None else 0
 
+    def _may_tear(self) -> bool:
+        """Whether VSync off may tear. Fullscreen, and a window with Low delay picked, as before. Not a window that's
+        on DXGI only because Windows' HDR is on (KEEP_HDR): with the standard presentation it never tore."""
+        return not self.keep_hdr or self._borderless or self.settings.present == "dxgi"
+
     def _present(self) -> None:
         if self.dx is not None:
             if self.glfw.get_window_attrib(self.win, self.glfw.ICONIFIED):
                 return  # minimised: nothing to show, and a flip-model Present can wait for a window nobody sees
             t0 = time.perf_counter()
-            self.dx.present(self.settings.vsync)
+            self.dx.present(self.settings.vsync, tear=self._may_tear())
             _say_if_slow("DXGI Present", t0)
         else:
             self.glfw.swap_buffers(self.win)
@@ -839,6 +855,11 @@ class GLWindowSink:
                 self.toast("Fullscreen starts next time you press Play: Low delay works in a window only", 5.0)
                 return
             self._set_fullscreen(st.fullscreen)
+            if (st.fullscreen and self.dx is None and self.overlay_of is None and KEEP_HDR and windows_hdr_on()):
+                # Windows' HDR was turned on after the window opened (with OpenGL's own presentation)
+                self.toast("Windows' HDR is on now: fullscreen switches the display to SDR until you press Play again",
+                           6.0)
+                return
         elif key == "vsync":
             glfw.swap_interval(1 if st.vsync else 0)
         elif key in ("look", "look_on"):
