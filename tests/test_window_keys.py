@@ -66,3 +66,22 @@ def test_after_the_first_seconds_only_the_usual_takers(monkeypatch, capsys):
         s.fg = (200, exe)
         _poll(w)
     assert s.brought == 4
+
+
+def test_chiaki_minimised_again_when_the_video_window_is_back_in_front(monkeypatch):
+    """After the first seconds, settle_hook (run.py: minimise chiaki-ng) runs each time the video window gets the keys
+    back (Alt+Tab to chiaki-ng's window restores it), not on every poll, and not while chiaki-ng is in front."""
+    w, s = _window(monkeypatch, (OURS, "python.exe"), idle_ms=50)
+    w._settle_until = time.perf_counter() - 1  # past the first seconds
+    calls = []
+    w.settle_hook = lambda: calls.append(1)
+    _poll(w)
+    assert calls == []  # in front all along: nothing to do
+    s.fg = (200, "chiaki.exe")  # Alt+Tab to chiaki-ng: left alone while the player looks at it
+    _poll(w)
+    assert calls == []
+    s.fg = (OURS, "python.exe")  # and back: chiaki-ng's window goes down again
+    _poll(w)
+    assert calls == [1]
+    _poll(w)
+    assert calls == [1]  # once per return, not four times a second

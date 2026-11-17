@@ -504,9 +504,11 @@ class GLWindowSink:
         glfw.set_key_callback(self.win, self._on_key)
         glfw.set_cursor_pos_callback(self.win, self._on_mouse)
         self._hint_next = 0.0  # moving the mouse shows the keys again, at most this often
-        # settle(): in the first seconds chiaki-ng can show its window again (settle_hook, run.py, minimises it), and
-        # all along a program can take the keys without the player doing anything (they're taken back).
+        # settle(): in the first seconds chiaki-ng can show its window again (settle_hook, run.py, minimises it; later
+        # too, each time the video window gets the keys back, as Alt+Tab to chiaki-ng's window restores it), and all
+        # along a program can take the keys without the player doing anything (they're taken back).
         self.settle_hook = None
+        self._was_front = True
         t = time.perf_counter()
         self._settle_until, self._settle_next, self._any_until = t + 10.0, 0.0, t + 15.0
         self._front_at: float | bool = t  # when the video window last had the keys (from when it opened); False: off
@@ -632,25 +634,28 @@ class GLWindowSink:
 
     def settle(self) -> None:
         """Four times a second: in the first seconds, settle_hook (run.py: minimise chiaki-ng again if it showed its
-        window); and all along, the keys taken back for the video window when another program took them with no
-        keyboard or mouse input from the player since the video window had them (the player switching on purpose,
-        Alt+Tab or a click, is input, and left alone; a controller isn't, and switches nothing)."""
+        window), and after them each time the video window is back in front (Alt+Tab to chiaki-ng's window restores
+        it, and its unsmoothed picture would stay behind, or over, this one); and all along, the keys taken back for
+        the video window when another program took them with no keyboard or mouse input from the player since the
+        video window had them (the player switching on purpose, Alt+Tab or a click, is input, and left alone; a
+        controller isn't, and switches nothing)."""
         now = time.perf_counter()
         if now < self._settle_next or self.overlay_of is not None:
             return
         self._settle_next = now + 0.25
-        if self.settle_hook is not None and now < self._settle_until:
-            try:
-                self.settle_hook()
-            except Exception as e:  # noqa: BLE001 - only tidying up: the video goes on
-                print(f"[display] {str(e)[:160]}")
-                self.settle_hook = None
+        early = now < self._settle_until
+        if early:
+            self._run_settle_hook()
         if sys.platform != "win32" or self._front_at is False:
             return
         from .winutil import bring_to_front, foreground, ms_since_input
         try:
             ours = self.glfw.get_win32_window(self.win)
             hwnd, exe = foreground()
+            back = hwnd == ours and not getattr(self, "_was_front", True)
+            self._was_front = hwnd == ours
+            if back and not early:
+                self._run_settle_hook()
             if hwnd == ours:
                 self._front_at = now
                 return
@@ -668,6 +673,15 @@ class GLWindowSink:
         except Exception as e:  # noqa: BLE001
             print(f"[display] couldn't check which window is in front ({str(e)[:160]})")
             self._front_at = False  # (stops checking)
+
+    def _run_settle_hook(self) -> None:
+        if self.settle_hook is None:
+            return
+        try:
+            self.settle_hook()
+        except Exception as e:  # noqa: BLE001 - only tidying up: the video goes on
+            print(f"[display] {str(e)[:160]}")
+            self.settle_hook = None
 
     def _on_mouse(self, win, x, y) -> None:
         """Moving the mouse over the video shows the keys for a moment (not over the menu or another message)."""

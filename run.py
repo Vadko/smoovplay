@@ -580,8 +580,9 @@ def main() -> int:
             hidden.clear()
 
     def keep_chiaki_down() -> None:
-        """For the video window's first seconds (GLWindowSink.settle): chiaki-ng can show its window again just after
-        the stream starts (its stream view opening), after it was minimised. Minimise it again."""
+        """For the video window's first seconds, and each time it's back in front after that (GLWindowSink.settle):
+        chiaki-ng can show its window again just after the stream starts (its stream view opening), and Alt+Tab to it
+        restores it, after it was minimised. Minimise it again."""
         if not (kind == "chiaki" and settings.minimize_chiaki):
             return
         from framegen.winutil import SW_SHOWMINNOACTIVE, minimised, show, windows_of
