@@ -45,6 +45,11 @@ namespace SmoovPlay
         [STAThread]
         static int Main(string[] args)
         {
+            // Tooltips as before .NET Framework 4.8's WCAG 2.1 ones, which stay open while the mouse is between a
+            // tooltip's owner and the tooltip (so it can get onto it). Ours open below the mouse and run to the right,
+            // over the next buttons in a row (the Settings page's choices: AMD FSR 1, NVIDIA RTX VSR, Bilinear), so
+            // moving along a row kept showing the first button's tooltip. First thing: WPF keeps the value it reads first.
+            AppContext.SetSwitch("Switch.System.Windows.Controls.ToolTip.OptOutOfWCAG21ToolTipBehavior", true);
             ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
             var opts = Options.Parse(args);
             if (args.Length == 2 && args[0] == "--check-signature")  // testing the Visual C++ download check
