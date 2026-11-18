@@ -879,7 +879,21 @@
             <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
               <TextBlock Text="SmoovPlay" FontFamily="{StaticResource Display}" FontSize="18" FontWeight="SemiBold" TextOptions.TextFormattingMode="Ideal"/>
               <TextBlock x:Name="RailVersion" Text="v0.2.0" FontSize="11.5" Foreground="{StaticResource Muted}" Margin="1,1,0,0"/>
-              <!-- shown when GitHub has a newer release (UpdateCheck in Core.cs) -->
+              <!-- asks GitHub now (UpdateCheck.Now in Updater.cs); RailUpdate takes its place once there's a newer release -->
+              <Button x:Name="RailCheck" Content="Check for updates" Visibility="Collapsed" Cursor="Hand" HorizontalAlignment="Left" Margin="1,2,0,0"
+                      ToolTip="Asks GitHub for a newer SmoovPlay now (it also checks by itself when it opens)." AutomationProperties.Name="Check for updates">
+                <Button.Template>
+                  <ControlTemplate TargetType="Button">
+                    <TextBlock x:Name="t" Text="{Binding Content, RelativeSource={RelativeSource TemplatedParent}}" FontSize="11"
+                               Foreground="{StaticResource Muted}"/>
+                    <ControlTemplate.Triggers>
+                      <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="t" Property="TextDecorations" Value="Underline"/></Trigger>
+                      <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="t" Property="TextDecorations" Value="Underline"/></Trigger>
+                    </ControlTemplate.Triggers>
+                  </ControlTemplate>
+                </Button.Template>
+              </Button>
+              <!-- shown when GitHub has a newer release (UpdateCheck in Updater.cs) -->
               <Button x:Name="RailUpdate" Visibility="Collapsed" Cursor="Hand" HorizontalAlignment="Left" Margin="1,3,0,0">
                 <Button.Template>
                   <ControlTemplate TargetType="Button">
@@ -1268,6 +1282,7 @@
               <RowDefinition Height="*"/>
               <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Focusable="False">
             <StackPanel VerticalAlignment="Center" Margin="0,0,0,10">
               <Grid x:Name="PlayDiscArea" HorizontalAlignment="Center" Width="214" Height="214">
                 <Ellipse x:Name="PlayGlow" Width="170" Height="170" Fill="{StaticResource AccentGrad}" Opacity="0.35">
@@ -1309,6 +1324,8 @@
               <WrapPanel x:Name="PlaySources" HorizontalAlignment="Center" Margin="0,16,0,0" Visibility="Collapsed"/>
               <!-- Playing from a capture card: which card and which sound (Ui.BuildDevices). -->
               <WrapPanel x:Name="PlayDevices" HorizontalAlignment="Center" Margin="0,6,0,0" Visibility="Collapsed"/>
+              <!-- Playing from an app's window: SmoovPlay's keys, which work from anywhere, and changing them (Ui.BuildKeys). -->
+              <StackPanel x:Name="PlayKeys" HorizontalAlignment="Center" Margin="0,14,0,0" Visibility="Collapsed"/>
               <WrapPanel x:Name="PlayChips" HorizontalAlignment="Center" Margin="0,18,0,0"/>
               <Border x:Name="PlayNote" HorizontalAlignment="Center" MaxWidth="560" Margin="0,16,0,0" CornerRadius="10" Background="#1FFFC24B" BorderBrush="#40FFC24B"
                       BorderThickness="1" Padding="14,10" Visibility="Collapsed">
@@ -1348,6 +1365,7 @@
                 </StackPanel>
               </Border>
             </StackPanel>
+            </ScrollViewer>
             <Grid Grid.Row="1">
               <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
@@ -1690,6 +1708,8 @@
                 <StackPanel>
                   <TextBlock Text="IN THE VIDEO WINDOW" FontSize="11.5" FontWeight="SemiBold" Foreground="{StaticResource Muted}"/>
                   <WrapPanel x:Name="Keys" Margin="0,8,0,0"/>
+                  <TextBlock Style="{StaticResource Small}" Margin="0,10,0,0" TextWrapping="Wrap"
+                             Text="Playing from an app's window? The app keeps the keyboard, so these use Ctrl+Alt there: Ctrl+Alt+M menu, Ctrl+Alt+F fullscreen, Ctrl+Alt+Esc quit. The Play page lists them all and lets you change them."/>
                   <TextBlock Style="{StaticResource Small}" Margin="0,12,0,0" TextWrapping="Wrap"
                              ToolTip="Most PS5 games already run at 60 fps, so SmoovPlay has nothing to add. Test with a 60 fps game (or Simulate a 30 fps game in the M menu) plays one as if it were 30 fps, then reports how well your PC keeps up and how close the AI frames come to the real ones."
                              Text="Only 60 fps games? Test with a 60 fps game, on the Play page, plays one as if it were 30 fps."/>

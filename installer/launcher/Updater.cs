@@ -246,8 +246,8 @@ namespace SmoovPlay
     }
 
     /// <summary>
-    /// Asks GitHub, at most about once a day, for the newest release (GitHub above); SMOOVPLAY_UPDATE_CHECK=0 turns
-    /// it off. A newer one shows a link in the launcher, which installs it (Updater) or opens its page.
+    /// Asks GitHub for the newest release (GitHub above) when the launcher opens, at most every 6 hours, and when
+    /// the rail's "Check for updates" is clicked; SMOOVPLAY_UPDATE_CHECK=0 turns the automatic check off. A newer one shows a link in the launcher, which installs it (Updater) or opens its page.
     /// </summary>
     static class UpdateCheck
     {
@@ -271,7 +271,21 @@ namespace SmoovPlay
             });
         }
 
-        /// <summary>The newest tag from a check in the last 20 hours (null if that check found none).</summary>
+        /// <summary>The rail's "Check for updates": asks GitHub now, whatever the last check found, and calls
+        /// done(newest tag or null, null) or done(null, why it couldn't) on a worker thread.</summary>
+        public static void Now(Action<string, string> done)
+        {
+            string repo = GitHub.Repo;
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                string tag = null, error = null;
+                try { if (repo == null) error = "this build has no releases to check"; else tag = Fetch(repo); }
+                catch (Exception e) { error = e.Message; }
+                done(tag, error);
+            });
+        }
+
+        /// <summary>The newest tag from a check in the last 6 hours (null if that check found none).</summary>
         static bool Cached(string repo, out string tag)
         {
             tag = null;
@@ -281,7 +295,7 @@ namespace SmoovPlay
                 DateTime when;
                 if (l.Length < 3 || l[1] != repo ||
                     !DateTime.TryParse(l[0], null, System.Globalization.DateTimeStyles.RoundtripKind, out when) ||
-                    DateTime.UtcNow - when.ToUniversalTime() > TimeSpan.FromHours(20)) return false;
+                    DateTime.UtcNow - when.ToUniversalTime() > TimeSpan.FromHours(6)) return false;
                 tag = l[2].Length > 0 ? l[2] : null;
                 return true;
             }

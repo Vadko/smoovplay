@@ -1,5 +1,83 @@
 # Changelog
 
+## 0.3.1
+
+**Play**
+- **Game frame rate: 30 fps** (Settings, Smoothness; and the in-video menu). For a game locked at 30 fps: every
+  other frame is taken as new, so motion stays even whatever the scene. With PS5 Remote Play, frames are counted by
+  the stream's own numbers, so frames lost on the way don't throw the rhythm off. On Auto, a still or dark scene could make
+  SmoovPlay read a locked-30 game (Gotham Knights on PS5) as 40 fps or more, which made motion uneven and kept
+  turning Even out 40-60 fps on and off. Simulate a 30 fps game was the way round it, but that's a test mode: it also
+  scores every frame, which costs graphics card time at 90 fps. The new setting is saved, as everything else you
+  change in the in-video menu is.
+- **A frame log for each PS5 Remote Play session**, next to its log (frames-*.csv, the last 10 kept, about 1.5 MB per
+  5 minutes, no pictures): each frame's size and timing and what SmoovPlay made of it, so Auto can be tuned on real
+  games.
+
+**Fixes**
+- **Alt+Tab works while the video is fullscreen.** Fullscreen was an always-on-top window, so switching to another
+  program left the video over it. It's now a borderless window over the monitor, as games' borderless mode.
+- **The video window's keys work without a click again** when it opens behind chiaki-ng or the launcher. It took the
+  keys only if nothing had been pressed or moved since it opened (moving the mouse counted), and only after
+  chiaki-ng was minimised, which can leave no window to take them from. It now takes them as it opens, before
+  minimising chiaki-ng, and the log says if it had to try again.
+- **Esc no longer freezes the video window while a before & after video is being made.** The window closes straight
+  away and the video carries on in the background; the launcher says when it's saved, with a button to show it.
+  Update, Repair and Uninstall ask first while one is being made.
+- **Stop in the launcher ends a session gracefully**, the same as Esc (a second Stop, or 20 s, forces it).
+- **Results no longer say "about 60 fps, between 30 and 60"** when a game ran unevenly: they say how long it ran
+  between 30 and 60 fps and that its frames were evened out.
+- **chiaki-ng stays minimised after Alt+Tab.** It was only minimised in the stream's first seconds, so after
+  switching to its window and back, its unsmoothed picture stayed up beside SmoovPlay's. Thanks to
+  [@Vadko](https://github.com/Vadko) ([#5](https://github.com/smoovplay/smoovplay/pull/5))!
+- **The PC check recognises 6 GHz Wi-Fi** (Windows 11), which it used to call 2.4 or 5 GHz. Thanks to
+  [@Vadko](https://github.com/Vadko) ([#4](https://github.com/smoovplay/smoovplay/pull/4))!
+
+**Capture cards** (Experimental)
+- **Finding cards is sturdier** ([#2](https://github.com/smoovplay/smoovplay/issues/2), an Elgato HD60 X that
+  wasn't listed):
+  - SmoovPlay now reads device names from Windows' list without loading each camera's driver, as OBS does. Before,
+    it opened every camera and virtual camera to see what it carried, so one faulty driver could stop the whole
+    list (or Play) before the card was found. Only the card you pick is opened.
+  - Cards that report video and sound together were dropped from the list without a word; they're listed now.
+  - An empty list is looked at once more half a second later, and looking gives up after 30 s instead of waiting
+    forever on a driver that doesn't answer.
+  - The Play page says which it is: the list failed (and why), Windows has sound devices only, or there's no card.
+- **When a card won't open, it says why**: in use by another app (many cards, Elgato's USB ones among them, work
+  with one app at a time: close OBS or Elgato's apps first), blocked by Windows' camera privacy setting, or
+  unplugged.
+- **The log notes a card on a USB 2 port** (1280×720 at 30 fps at most) and a card offering 10-bit HDR, which
+  SmoovPlay can't read yet: it uses 8-bit, so turn HDR off on the console if the picture looks washed out.
+
+**App window** (Experimental)
+- **The Xbox app is found again** ([#1](https://github.com/smoovplay/smoovplay/issues/1),
+  [#3](https://github.com/smoovplay/smoovplay/issues/3)). Its current version runs as XboxPcAppCE.exe, which
+  SmoovPlay didn't know, and Microsoft Store apps draw inside a frame window that SmoovPlay skipped. Both are listed
+  now, under the app's own name.
+- **When a streaming app is running but can't be picked** (in the tray, on another desktop, too small), the Play
+  page says so and what to do.
+- **The smooth picture fits the app's window.** It was drawn at 16:9 inside it, so a window of another shape (a
+  browser's, say) looked squeezed, with bars over part of the app. It now lines up with the app exactly, even when
+  the window hangs off the screen.
+- **SmoovPlay's keys work while the app has the keyboard**: Ctrl+Alt with the usual key, from anywhere. Ctrl+Alt+M
+  menu (then the arrows, Enter and Esc work in it until it closes), Ctrl+Alt+F fullscreen, Ctrl+Alt+Esc quit,
+  Ctrl+Alt+S stats, Ctrl+Alt+I smooth on/off. Before, M, F and Esc went to the app, and only Stop in the launcher
+  ended it. The video lists them when it starts and when the mouse moves over it, and the Play page has them in a
+  card with **Change keys**: click one and press new keys. A key another program already has is skipped for the
+  next one (Ctrl+Alt+Space for the menu, Ctrl+Alt+End to quit), and the Play page says so.
+
+**Launcher**
+- **Check for updates** under the version number on the left. The automatic check now runs every 6 hours, not 20.
+- **Copy diagnostics** (and Send feedback) say more and share less:
+  - the source you play from, its own PC check, and for capture cards the devices Windows lists, the card's driver
+    state and USB IDs, and why a device list failed; for App window, the streaming apps found and a count of other
+    windows (never their titles)
+  - your Windows user name is left out of every path, whatever its capitals (some were missed before), and device
+    names like "Alex's iPhone" lose the name
+  - Windows 11 is called Windows 11 (Windows itself still says "Windows 10" in the place SmoovPlay read)
+- **Frame tap is labelled "for developers"**, and points app users to App window: it only works with an app built
+  to send frames to SmoovPlay.
+
 ## 0.3.0
 
 **Play**

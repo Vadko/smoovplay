@@ -41,17 +41,23 @@ import time
 from ctypes import wintypes as wt
 from dataclasses import asdict, dataclass
 
-# Apps people stream games through, by program name: preset -> (exe, what it's called). Browsers come with no preset
-# (a cloud game is one tab among many): pick their window from the list.
+# Apps people stream games through, by program name: preset -> (its programs, what it's called). Browsers come with
+# no preset (a cloud game is one tab among many): pick their window from the list.
 PRESETS = {
-    "ps-remote-play": ("remoteplay.exe", "PS Remote Play"),
-    "xbox": ("xboxpcapp.exe", "Xbox app"),
-    "moonlight": ("moonlight.exe", "Moonlight"),
+    "ps-remote-play": (("remoteplay.exe",), "PS Remote Play"),
+    # The Xbox app's Start menu entry runs XboxPcAppCE.exe (a desktop app); its older Store version, XboxPcApp.exe, is
+    # still in the same package and draws inside a Store app frame (STORE_FRAME, below)
+    "xbox": (("xboxpcappce.exe", "xboxpcapp.exe"), "Xbox app"),
+    "moonlight": (("moonlight.exe",), "Moonlight"),
 }
-KNOWN = {exe: name for exe, name in PRESETS.values()} | {
+PRESET_EXES = {exe for exes, _ in PRESETS.values() for exe in exes}
+KNOWN = {exe: name for exes, name in PRESETS.values() for exe in exes} | {
     "chrome.exe": "Chrome", "msedge.exe": "Edge", "firefox.exe": "Firefox", "geforcenow.exe": "GeForce NOW"}
 MIN_SIZE = (320, 180)  # smaller windows aren't game streams
-SKIP_EXE = {"explorer.exe", "textinputhost.exe", "applicationframehost.exe", "shellexperiencehost.exe",
+# Store (UWP) apps don't own their top-level window: Windows' ApplicationFrameHost.exe draws the frame, and the app's
+# own window (a Windows.UI.Core.CoreWindow) sits inside it. Such a frame is listed under the app inside it.
+STORE_FRAME = "applicationframehost.exe"
+SKIP_EXE = {"explorer.exe", "textinputhost.exe", STORE_FRAME, "shellexperiencehost.exe",
             "searchhost.exe", "startmenuexperiencehost.exe", "systemsettings.exe", "smoovplay.exe"}
 CHECK_S = 0.5  # how often the window's place is looked at
 SIZE = (1920, 1080)  # what frames are scaled to, for the pipeline
@@ -137,6 +143,7 @@ def _api():
         u32.GetWindowTextW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
         u32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
         u32.GetWindow.argtypes, u32.GetWindow.restype = [wt.HWND, wt.UINT], wt.HWND
+        u32.FindWindowExW.argtypes, u32.FindWindowExW.restype = [wt.HWND, wt.HWND, wt.LPCWSTR, wt.LPCWSTR], wt.HWND
         u32.GetWindowLongW.argtypes = [wt.HWND, ctypes.c_int]
         u32.GetClientRect.argtypes = [wt.HWND, ctypes.POINTER(_RECT)]
         u32.ClientToScreen.argtypes = [wt.HWND, ctypes.POINTER(wt.POINT)]
@@ -165,6 +172,26 @@ def _exe_of(hwnd: int, cache: dict) -> str:
                 cache[pid.value] = os.path.basename(buf.value).lower()
             k32.CloseHandle(h)
     return cache[pid.value]
+
+
+def _hosted_exe(frame: int, cache: dict) -> str:
+    """The app inside a Store app's frame (STORE_FRAME): the program of its CoreWindow, or of the first child window
+    another process owns. "" when there's none: the app is suspended, minimised or closing (Windows takes its window
+    out of the frame then)."""
+    u32, _, _ = _api()
+    child = u32.FindWindowExW(frame, None, "Windows.UI.Core.CoreWindow", None)
+    if child:
+        return _exe_of(child, cache)
+    host = _exe_of(frame, cache)
+    child = u32.FindWindowExW(frame, None, None, None)
+    for _ in range(64):  # a frame has a handful of children; the cap only guards against a loop
+        if not child:
+            break
+        exe = _exe_of(child, cache)
+        if exe and exe != host:
+            return exe
+        child = u32.FindWindowExW(frame, child, None, None)
+    return ""
 
 
 def client_rect(hwnd: int) -> Rect | None:
@@ -231,43 +258,64 @@ def exclude_from_capture(hwnd: int) -> bool:
 
 
 # ----------------------------------------------------------------------------- finding the window
-def find_windows() -> list[AppWindow]:
+def find_windows(left_out: dict | None = None) -> list[AppWindow]:
     """Top-level windows that could be a game stream: visible, not minimised away from view, big enough, not a
-    tool window or part of Windows' shell, and not this process's own. Known apps first."""
+    tool window or part of Windows' shell, and not this process's own. A Store app's frame counts as the app inside
+    it. Known apps first.
+
+    left_out, if given, gets why a streaming app (PRESETS) that's running wasn't listed: {program: {reasons}}, for
+    the launcher's hint and diagnostics. Only those apps' programs are noted, never other windows or titles."""
     u32, _, dwm = _api()
     own, exes, found = os.getpid(), {}, []
 
+    def note(exe: str, why: str) -> None:
+        if left_out is not None and exe in PRESET_EXES:
+            left_out.setdefault(exe, set()).add(why)
+
     @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
     def each(hwnd, _):
-        if not u32.IsWindowVisible(hwnd) or u32.GetWindow(hwnd, 4):  # GW_OWNER: dialogs and popups belong to another
-            return True
-        if u32.GetWindowLongW(hwnd, -20) & 0x80:  # GWL_EXSTYLE & WS_EX_TOOLWINDOW
-            return True
-        cloaked = wt.DWORD()
-        dwm.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))  # DWMWA_CLOAKED
-        if cloaked.value:
-            return True
         pid = wt.DWORD()
         u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         if pid.value == own:
             return True
+        # Hidden, owned by another window (dialogs, popups) or a tool window (GWL_EXSTYLE & WS_EX_TOOLWINDOW)
+        if not u32.IsWindowVisible(hwnd) or u32.GetWindow(hwnd, 4) or u32.GetWindowLongW(hwnd, -20) & 0x80:
+            if left_out is not None:
+                note(_exe_of(hwnd, exes), "no window on screen")
+            return True
         exe = _exe_of(hwnd, exes)
+        if exe == STORE_FRAME:
+            exe = _hosted_exe(hwnd, exes)
         if not exe or exe in SKIP_EXE:
+            return True
+        cloaked = wt.DWORD()
+        dwm.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))  # DWMWA_CLOAKED
+        if cloaked.value:
+            note(exe, "on another desktop, or not shown yet")
             return True
         n = u32.GetWindowTextLengthW(hwnd)
         buf = ctypes.create_unicode_buffer(n + 1)
         u32.GetWindowTextW(hwnd, buf, n + 1)
         r = client_rect(hwnd)
         iconic = bool(u32.IsIconic(hwnd))
-        if not buf.value or (r is None and not (iconic and exe in KNOWN)):  # minimised: only apps it knows
+        if not buf.value:
+            note(exe, "a window with no title")
+            return True
+        if r is None and not (iconic and exe in KNOWN):  # minimised: only apps it knows
+            note(exe, "minimised" if iconic else "closing")
             return True
         if r is not None and (r.w < MIN_SIZE[0] or r.h < MIN_SIZE[1]):
+            note(exe, "its window is too small")
             return True
         found.append(AppWindow(int(hwnd), buf.value, exe, r.w if r else 0, r.h if r else 0))
         return True
 
     u32.EnumWindows(each, 0)
-    return sorted(found, key=lambda w: (w.exe not in KNOWN, w.exe not in dict(PRESETS.values()), w.app.lower()))
+    if left_out is not None:  # an app with a window listed isn't missing, whichever of its programs drew it
+        listed = {w.app for w in found}
+        for exe in [e for e in left_out if KNOWN[e] in listed]:
+            del left_out[exe]
+    return sorted(found, key=lambda w: (w.exe not in KNOWN, w.exe not in PRESET_EXES, w.app.lower()))
 
 
 def pick(query: str, windows: list[AppWindow] | None = None) -> AppWindow | None:
@@ -282,11 +330,13 @@ def pick(query: str, windows: list[AppWindow] | None = None) -> AppWindow | None
         hwnd = int(q[5:], 0)
         return next((w for w in windows if w.hwnd == hwnd), None)
     if q.lower() in PRESETS:
-        q = "exe:" + PRESETS[q.lower()][0]
-    if q.lower().startswith("exe:"):
+        exes = set(PRESETS[q.lower()][0])
+        matches = [w for w in windows if w.exe in exes]
+    elif q.lower().startswith("exe:"):
         exe = q[4:].strip().lower()
         exe = exe if exe.endswith(".exe") else exe + ".exe"
-        matches = [w for w in windows if w.exe == exe]
+        same = next((set(exes) for exes, _ in PRESETS.values() if exe in exes), {exe})  # either Xbox app program
+        matches = [w for w in windows if w.exe in same]
     else:
         matches = [w for w in windows if q.lower() in w.title.lower()]
     return max(matches, key=lambda w: w.w * w.h, default=None)
@@ -355,7 +405,13 @@ class WindowSource:
               f"at {hz} Hz, captured as {self.w}x{self.h}")
 
     def where(self) -> tuple[Rect, Rect] | None:
-        return (self._client, self._monitor) if self._client is not None else None
+        """Where the overlay goes: the part of the window's picture area that's captured (on its monitor, even
+        sizes), in screen pixels, and the monitor. The frame is that area, so the overlay lines up with the app even
+        when the window hangs off the screen."""
+        if self._client is None or self._grab is None:
+            return None
+        r, m = self._grab.region, self._monitor
+        return Rect(m.x + r.x, m.y + r.y, r.w, r.h), m
 
     def _moved(self) -> bool:
         """Re-reads the window's place; True if capture has to restart (moved, resized, or to another monitor)."""
@@ -488,14 +544,19 @@ def main(argv: list[str] | None = None) -> int:
     if sys.platform != "win32":
         print(json.dumps({"windows": []}) if a.json else "window capture needs Windows")
         return 0
-    windows = find_windows()
+    left_out: dict = {}
+    windows = find_windows(left_out)
+    missed = [{"exe": exe, "app": KNOWN[exe], "why": sorted(why)} for exe, why in sorted(left_out.items())]
     if a.json:
-        print(json.dumps({"windows": [{**asdict(w), "app": w.app, "known": w.exe in KNOWN} for w in windows]}))
+        print(json.dumps({"windows": [{**asdict(w), "app": w.app, "known": w.exe in KNOWN} for w in windows],
+                          "left_out": missed}))
     else:
         for w in windows:
             print(f"hwnd:{w.hwnd:<10} {w.app:16} {w.w}x{w.h}  {w.title}")
         if not windows:
             print("no app windows found")
+        for m in missed:
+            print(f"{m['app']} ({m['exe']}) is running but left out: {', '.join(m['why'])}")
     return 0
 
 

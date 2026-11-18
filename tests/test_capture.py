@@ -49,6 +49,47 @@ def test_devices_from_either_ffmpeg_format():
     assert [(d.name, d.kind) for d in old] == [("USB Video", "video"), ("Line In (USB Audio)", "audio")]
 
 
+def test_devices_with_several_kinds_of_output_are_listed():
+    # FFmpeg joins a device's kinds with ", " (libavdevice's " (%s" then ", %s"): a card that also carries its sound,
+    # or has a stream FFmpeg has no name for, was dropped from the list when only "video,audio" was read
+    text = '''"Game Capture HD60 X" (video, audio)
+  Alternative name "@device_pnp_a"
+"Elgato Capture (2)" (video, unknown)
+"Line (Card)" (audio, unknown)
+"Odd Card" (unknown)
+"Board" (audio, video)
+'''
+    assert [(d.name, d.kind) for d in c.parse_devices(text)] == [
+        ("Game Capture HD60 X", "video"), ("Elgato Capture (2)", "video"), ("Line (Card)", "audio"),
+        ("Odd Card", "unknown"), ("Board", "video")]
+    assert c.parse_devices(text)[0].alt == "@device_pnp_a"
+
+
+def test_a_cards_hdr_modes_are_noted_but_not_used():
+    # FFmpeg's DirectShow input can't read P010 and lists it as an unknown compression type (HD60 X in HDR)
+    text = (OPTIONS + "  unknown compression type 0x30313050  min s=1920x1080 fps=60 max s=1920x1080 fps=60\n")
+    modes = c.parse_modes(text)
+    assert c.Mode("p010", False, 1920, 1080, 60.0, 60.0) in modes
+    best, note = c.pick_mode(modes)
+    assert best.fmt == "yuyv422" and "10-bit HDR" in note and "turn HDR off" in note
+
+
+def test_a_card_on_usb_2_is_pointed_to_usb_3():
+    slow = [c.Mode("nv12", True, 1280, 720, 30.0, 30.0), c.Mode("nv12", True, 640, 480, 30.0, 30.0)]
+    assert "USB 3" in c.pick_mode(slow)[1]
+    assert "USB 3" not in c.pick_mode(slow + [c.Mode("nv12", True, 1920, 1080, 60.0, 60.0)])[1]
+
+
+def test_open_failures_are_said_in_plain_words():
+    busy = c.open_failure("Game Capture HD60 X", "Could not run graph (sometimes caused by a device already in use "
+                                                 "by other application)\n", "[Errno 5] I/O error")
+    assert "in use by another app" in busy and "one app at a time" in busy
+    assert "Privacy" in c.open_failure("Card", "", "0x80070005")
+    gone = "Could not find video device with name [Card] among source devices of type video."
+    assert "reconnect" in c.open_failure("Card", gone, "")
+    assert c.open_failure("Card", "", "something else") == ""
+
+
 def test_modes_are_read_with_their_colour_info():
     modes = c.parse_modes(OPTIONS)
     assert len(modes) == 6  # the unknown compression type is skipped

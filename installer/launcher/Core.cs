@@ -555,7 +555,9 @@ namespace SmoovPlay
         }
 
         /// <summary>Runs to completion, feeding every output line (stdout and stderr) to onLine.</summary>
-        public static int Run(ProcessStartInfo psi, Action<string> onLine, Action<Process> started)
+        /// <summary>Runs a process to the end, each output line to onLine. timeoutMs: past it the process is stopped and
+        /// TimedOut (-2) comes back (a capture driver that never answers mustn't leave the Play page looking forever).</summary>
+        public static int Run(ProcessStartInfo psi, Action<string> onLine, Action<Process> started, int timeoutMs = -1)
         {
             using (var pr = new Process { StartInfo = psi })
             {
@@ -565,9 +567,30 @@ namespace SmoovPlay
                 if (started != null) started(pr);
                 pr.BeginOutputReadLine();
                 pr.BeginErrorReadLine();
-                pr.WaitForExit();
+                if (!pr.WaitForExit(timeoutMs))
+                {
+                    try { pr.Kill(); } catch (Exception) { }
+                    return TimedOut;
+                }
+                pr.WaitForExit();  // the rest of the output
                 return pr.ExitCode;
             }
+        }
+
+        public const int TimedOut = -2;
+
+        /// <summary>A process's exit code in words: Windows' crash codes are named (a camera driver that crashes while
+        /// devices are listed takes Python down with 0xC0000005).</summary>
+        public static string Describe(int rc)
+        {
+            switch ((uint)rc)
+            {
+                case 0xC0000005: return "Python crashed (0xC0000005, access violation): usually a camera, capture or virtual-camera driver";
+                case 0xC0000409: return "Python crashed (0xC0000409)";
+                case 0xC0000135: return "a file Python needs is missing (0xC0000135): Repair SmoovPlay on the Help page";
+                case 0xC000013A: return "it was stopped (0xC000013A)";
+            }
+            return rc == TimedOut ? "it didn't finish in time" : rc < 0 ? $"exit code 0x{(uint)rc:X8}" : "exit code " + rc;
         }
 
         public static void Open(string target)
@@ -791,6 +814,10 @@ namespace SmoovPlay
     {
         public class Win { public long Hwnd; public string Title, Exe, App; public int W, H; public bool Known; }
         public static List<Win> List = new List<Win>();
+        /// <summary>Streaming apps that are running but weren't listed, and why ("Xbox app" -> "minimised"), from the
+        /// pipeline's left_out: only apps it knows are named, never other windows.</summary>
+        public static Dictionary<string, string> Missed = new Dictionary<string, string>();
+        public static string Error;  // why the last look failed, for diagnostics (null: it worked)
         public static bool Loaded;
         static readonly object gate = new object();
 
@@ -801,9 +828,10 @@ namespace SmoovPlay
                 var lines = new List<string>();
                 try
                 {
-                    int rc = Proc.Run(Proc.Python(p.Python, "-m framegen.window --list --json", p.App), l => { lock (lines) lines.Add(l); }, null);
+                    int rc = Proc.Run(Proc.Python(p.Python, "-m framegen.window --list --json", p.App), l => { lock (lines) lines.Add(l); }, null, 30000);
                     string json = lines.LastOrDefault(l => l.StartsWith("{"));
                     var list = new List<Win>();
+                    var missed = new Dictionary<string, string>();
                     if (rc == 0 && json != null)
                     {
                         var root = (Dictionary<string, object>)new JavaScriptSerializer().DeserializeObject(json);
@@ -813,11 +841,20 @@ namespace SmoovPlay
                                 Hwnd = Convert.ToInt64(d["hwnd"]), Title = (string)d["title"], Exe = (string)d["exe"], App = (string)d["app"],
                                 W = Convert.ToInt32(d["w"]), H = Convert.ToInt32(d["h"]), Known = d.ContainsKey("known") && (bool)d["known"],
                             });
+                        if (root.ContainsKey("left_out") && root["left_out"] is object[] left)
+                            foreach (Dictionary<string, object> d in left)
+                                missed[(string)d["app"]] = string.Join(", ", ((object[])d["why"]).Cast<string>());
+                        Error = null;
                     }
-                    else Program.Trace("app windows: " + (lines.LastOrDefault(l => l.Trim().Length > 0) ?? "exit code " + rc));
+                    else
+                    {
+                        Error = lines.LastOrDefault(l => l.Trim().Length > 0) ?? "exit code " + rc;
+                        Program.Trace("app windows: " + Error);
+                    }
                     List = list;
+                    Missed = missed;
                 }
-                catch (Exception e) { Program.Trace("app windows: " + e.Message); }
+                catch (Exception e) { Error = e.Message; Program.Trace("app windows: " + e.Message); }
                 Loaded = true;
             }
         }
@@ -829,6 +866,32 @@ namespace SmoovPlay
             string hwnd = CaptureDevices.Pref(prefs, "window-hwnd:"), exe = CaptureDevices.Pref(prefs, "window-app:");
             return List.FirstOrDefault(w => w.Hwnd.ToString() == hwnd) ?? List.FirstOrDefault(w => w.Exe == exe)
                    ?? List.FirstOrDefault(w => w.Known) ?? List.FirstOrDefault();
+        }
+
+        /// <summary>For diagnostics: the streaming apps and browsers found, with sizes, and only a count of other windows
+        /// (their titles and programs stay private).</summary>
+        public static string Summary()
+        {
+            var known = List.Where(w => w.Known).Select(w => w.App + (w.W > 0 ? $" {w.W}×{w.H}" : " (minimised)")).ToList();
+            int others = List.Count(w => !w.Known);
+            var sb = new StringBuilder();
+            sb.AppendLine("App windows: " + (known.Count == 0 ? "no streaming app or browser" : string.Join("; ", known))
+                          + (others > 0 ? $" (and {others} other windows)" : ""));
+            foreach (var m in Missed) sb.AppendLine($"App window left out: {m.Key} ({m.Value})");
+            if (Error != null) sb.AppendLine("App window list failed: " + Error);
+            return sb.ToString();
+        }
+
+        /// <summary>A line on a streaming app that's running but has no window to pick, or null.</summary>
+        public static string MissedHint()
+        {
+            if (Missed.Count == 0) return null;
+            var m = Missed.First();
+            string fix = m.Value.Contains("minimised") ? "restore its window"
+                       : m.Value.Contains("another desktop") ? "bring its window to this desktop"
+                       : m.Value.Contains("too small") ? "make its window bigger"
+                       : "open its window (not just the tray icon) and start streaming";
+            return $"The {m.Key} is running, but its window can't be used ({m.Value}). {Char.ToUpper(fix[0]) + fix.Substring(1)}, then press Look again.";
         }
 
         /// <summary>What run.py's --window gets: the window itself, or failing that (reopened since) its program.</summary>
@@ -846,6 +909,8 @@ namespace SmoovPlay
     static class CaptureDevices
     {
         public static List<string> Video = new List<string>(), Audio = new List<string>();
+        public static string Error;  // why the last look failed, or what went wrong after the list came (null: all well)
+        public static bool Failed;  // no list came at all (Error says why)
         public static bool Loaded;
         static readonly object gate = new object();
         // Names that are likely a capture card rather than a webcam (also the PC check's, in Checks.cs)
@@ -858,16 +923,26 @@ namespace SmoovPlay
                 var lines = new List<string>();
                 try
                 {
-                    int rc = Proc.Run(Proc.Python(p.Python, "-m framegen.capture --list --json", p.App), l => { lock (lines) lines.Add(l); }, null);
+                    int rc = Proc.Run(Proc.Python(p.Python, "-m framegen.capture --list --json", p.App), l => { lock (lines) lines.Add(l); }, null, 30000);
                     string json = lines.LastOrDefault(l => l.StartsWith("{"));
-                    if (rc == 0 && json != null)
+                    if (json != null)  // the list came out, even if something went wrong after (the exit code says)
                     {
                         var root = (Dictionary<string, object>)new JavaScriptSerializer().DeserializeObject(json);
                         Video = Names(root, "video"); Audio = Names(root, "audio");
+                        Error = root.ContainsKey("error") ? root["error"] as string : rc != 0 ? "after listing, " + Proc.Describe(rc) : null;
+                        Failed = Video.Count == 0 && Audio.Count == 0 && root.ContainsKey("error");
                     }
-                    else Program.Trace("capture devices: " + (lines.LastOrDefault(l => l.Trim().Length > 0) ?? "exit code " + rc));
+                    else
+                    {
+                        string last = lines.LastOrDefault(l => l.Trim().Length > 0 && !l.StartsWith("Traceback"));
+                        Error = rc == Proc.TimedOut ? "Windows' capture devices didn't answer in 30 s (a capture driver may be stuck: unplug the card and plug it back in)"
+                              : Proc.Describe(rc) + (last != null ? ": " + last.Trim() : "");
+                        Video = new List<string>(); Audio = new List<string>();
+                        Failed = true;
+                    }
+                    if (Error != null) Program.Trace("capture devices: " + Error);
                 }
-                catch (Exception e) { Program.Trace("capture devices: " + e.Message); }
+                catch (Exception e) { Error = e.Message; Failed = true; Program.Trace("capture devices: " + e.Message); }
                 Loaded = true;
             }
         }
@@ -878,6 +953,19 @@ namespace SmoovPlay
             if (root.ContainsKey(key) && root[key] is object[] items)
                 foreach (Dictionary<string, object> d in items) list.Add((string)d["name"]);
             return list;
+        }
+
+        /// <summary>For diagnostics: every video device, the sound devices named like a card (other sound devices are only
+        /// counted: a headset can carry its owner's name), and why the last look failed.</summary>
+        public static string Summary()
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("Capture devices (DirectShow): " + (Video.Count == 0 ? "no video device" : string.Join("; ", Video.Select(Diagnostics.NoOwner))));
+            var cardAudio = Audio.Where(n => Regex.IsMatch(n, CardPattern, RegexOptions.IgnoreCase)).ToList();
+            sb.AppendLine("Capture sound: " + (cardAudio.Count == 0 ? "none named like a card" : string.Join("; ", cardAudio.Select(Diagnostics.NoOwner)))
+                          + (Audio.Count > cardAudio.Count ? $" (and {Audio.Count - cardAudio.Count} other sound devices)" : ""));
+            if (Error != null) sb.AppendLine((Failed ? "Capture device list failed: " : "Capture device list: ") + Error);
+            return sb.ToString();
         }
 
         /// <summary>The card to use: the one picked (if it's still there), else the first that looks like a card, else the first.</summary>
@@ -921,6 +1009,7 @@ namespace SmoovPlay
         StreamWriter log, commands;
         readonly object gate = new object();
         volatile bool stopping;
+        volatile bool live;  // the video window reads commands (it sent its settings): Stop asks it to quit, as Esc does
         bool streamEnded;
         // TestMode: "Test with a 60 fps game" (run.py --test-mode). Every session passes --results, since the
         // video window's menu can also turn the test on; run.py only writes the file once something was tested.
@@ -928,11 +1017,13 @@ namespace SmoovPlay
         public string Source = "chiaki";  // a SourceDef.Kind
         public string CaptureVideo, CaptureAudio;  // a capture card's devices (CaptureDevices), for Source "capture"
         public string WindowApp;  // the app window (AppWindows.Query), for Source "window"
+        public string WindowKeysArg;  // its shortcuts, if changed (WindowKeys.Arg), for Source "window"
         public string LogPath, ResultsPath, LastLine = "";
         public Action<string> OnLine = s => { };
         public Action<PlayState, string> OnState = (s, d) => { };
         public Action<string> OnNote = s => { };
         public Action<string> OnSettings = json => { };  // a state line's JSON, on the output thread
+        public Action<string> OnWindowKeys = json => { };  // the shortcuts the video window got (App window mode)
 
         // Windows lets a program bring its window to the front only if the program in front allows it. When the
         // player has just pressed Play here, that's this launcher: let the video window come to the front, so the
@@ -943,7 +1034,19 @@ namespace SmoovPlay
         {
             try { if (Running) AllowSetForegroundWindow(py.Id); } catch (Exception) { }
         }
-        public bool Running { get { return py != null && !py.HasExited; } }
+        // py exists a moment before it starts (OnState(Starting) comes in between), and asking it anything then
+        // throws "No process is associated with this object": running means started and not exited.
+        volatile bool started;
+        public bool Running
+        {
+            get
+            {
+                var p = py;
+                if (p == null || !started) return false;
+                try { return !p.HasExited; }
+                catch (InvalidOperationException) { return false; }
+            }
+        }
 
         public Session(Paths p) { this.p = p; }
 
@@ -957,7 +1060,9 @@ namespace SmoovPlay
             if (SystemCheck.GpuName == "unknown") SystemCheck.QueryGpu();  // fills in the GPU and driver
             log.WriteLine($"[launcher] SmoovPlay {BuildInfo.Version}, {DateTime.Now:yyyy-MM-dd HH:mm:ss}, {(SystemCheck.GpuName == "unknown" && SystemCheck.OtherGpu != null ? SystemCheck.OtherGpu + " (DirectML)" : SystemCheck.GpuName + ", driver " + SystemCheck.Driver)}"
                           + (Source != "chiaki" ? ", source " + Source : "") + (TestMode ? ", test mode (60 fps game played as 30 fps)" : ""));
-            string args = "run.py " + Sources.RunArgs(Source, Source == "window" ? WindowApp : CaptureVideo, CaptureAudio) + " --display --control" + (TestMode ? " --test-mode" : "") + $" --results \"{ResultsPath}\" " + p.RunArgs;
+            string args = "run.py " + Sources.RunArgs(Source, Source == "window" ? WindowApp : CaptureVideo, CaptureAudio)
+                          + (Source == "window" && !string.IsNullOrEmpty(WindowKeysArg) ? " --window-keys \"" + WindowKeysArg.Replace("\"", "") + "\"" : "")
+                          + " --display --control" + (TestMode ? " --test-mode" : "") + $" --results \"{ResultsPath}\" " + p.RunArgs;
             var psi = Proc.Python(p.Python, args.Trim(), p.App);
             psi.RedirectStandardInput = true;
             py = new Process { StartInfo = psi, EnableRaisingEvents = true };
@@ -976,6 +1081,7 @@ namespace SmoovPlay
             };
             OnState(PlayState.Starting, null);
             py.Start();
+            started = true;
             LetVideoComeToFront();
             // Our own writer: UTF-8 without a BOM (Process's own uses the console's code page).
             commands = new StreamWriter(py.StandardInput.BaseStream, new UTF8Encoding(false)) { AutoFlush = true, NewLine = "\n" };
@@ -989,7 +1095,8 @@ namespace SmoovPlay
             lock (gate)
             {
                 // (the Looks page sends a look up to 25 times a second while a slider moves: just its size)
-                if (log != null) log.WriteLine("[launcher] settings: " + (command.StartsWith("look-show ") ? "look-show (" + command.Length + " characters)" : command));
+                if (log != null) log.WriteLine(command == "quit" ? "[launcher] Stop: asked the video window to close"
+                    : "[launcher] settings: " + (command.StartsWith("look-show ") ? "look-show (" + command.Length + " characters)" : command));
                 try
                 {
                     if (commands == null || !Running) return false;
@@ -1000,15 +1107,35 @@ namespace SmoovPlay
             }
         }
 
+        /// <summary>Stops the session. Once the video is up it's asked to close, as Esc does, so a clip being saved is
+        /// finished and chiaki-ng comes back; it's ended outright if it hasn't gone 20 s later, if it isn't up yet,
+        /// or on a second Stop.</summary>
         public void Stop()
         {
+            bool again = stopping;
             stopping = true;
-            try { if (Running) py.Kill(); } catch (Exception) { }
+            var pr = py;
+            try
+            {
+                if (pr == null || pr.HasExited) return;
+                if (!again && live && Send("quit"))
+                {
+                    System.Threading.ThreadPool.QueueUserWorkItem(_ => { try { if (!pr.WaitForExit(20000)) pr.Kill(); } catch (Exception) { } });
+                    return;
+                }
+                pr.Kill();
+            }
+            catch (Exception) { }
         }
 
         void Line(string line)
         {
-            if (line.StartsWith(StatePrefix)) { OnSettings(line.Substring(StatePrefix.Length)); return; }  // not for the log
+            if (line.StartsWith(StatePrefix))  // not for the log; it also means the video window reads commands
+            {
+                live = true;
+                OnSettings(line.Substring(StatePrefix.Length));
+                return;
+            }
             lock (gate) { if (log != null) log.WriteLine(line); }
             if (line.Trim().Length > 0) LastLine = line.Trim();
             OnLine(line);
@@ -1042,6 +1169,72 @@ namespace SmoovPlay
                 OnNote(line.Substring("[chiaki] WARNING:".Length).Trim());
             else if (line.StartsWith("[chiaki] stream ended"))
                 streamEnded = true;
+            else if (line.StartsWith("[window-keys] "))
+                OnWindowKeys(line.Substring("[window-keys] ".Length));
+        }
+    }
+
+    /// <summary>Before &amp; after videos being made (framegen/replay.py, SAVING_DIR). Each is a process of its own that
+    /// carries on after the video window and this launcher close, and keeps %APPDATA%\framegen\saving\&lt;process id&gt;.txt
+    /// while it works: the video's path, then "failed: why" if it failed. Updating, repairing or uninstalling replaces
+    /// the Python it runs on, so those stop it.</summary>
+    static class Saving
+    {
+        public class Video { public int Pid; public string Out, Failed; public bool Running; }
+
+        static string Dir { get { return Path.Combine(Paths.SettingsDir, "saving"); } }
+
+        /// <summary>Every one there: still being made, failed, or left by one that was stopped.</summary>
+        public static List<Video> Read()
+        {
+            var all = new List<Video>();
+            try
+            {
+                if (!Directory.Exists(Dir)) return all;
+                foreach (var f in Directory.GetFiles(Dir, "*.txt"))
+                {
+                    int pid;
+                    string[] l;
+                    if (!int.TryParse(Path.GetFileNameWithoutExtension(f), out pid)) continue;
+                    try { l = File.ReadAllLines(f); } catch (Exception) { continue; }  // being written
+                    if (l.Length == 0 || l[0].Trim().Length == 0) continue;
+                    var v = new Video { Pid = pid, Out = l[0].Trim() };
+                    v.Failed = l.Length > 1 && l[1].StartsWith("failed: ") ? l[1].Substring(8).Trim() : null;
+                    v.Running = v.Failed == null && Alive(pid, File.GetLastWriteTime(f));
+                    all.Add(v);
+                }
+            }
+            catch (Exception) { }
+            return all;
+        }
+
+        /// <summary>That process is still the one that wrote the file at `since` (not a later one given its id).</summary>
+        static bool Alive(int pid, DateTime since)
+        {
+            try
+            {
+                using (var pr = Process.GetProcessById(pid))
+                    return !pr.HasExited && pr.ProcessName.StartsWith("python", StringComparison.OrdinalIgnoreCase)
+                           && pr.StartTime <= since.AddSeconds(2);
+            }
+            catch (Exception) { return false; }
+        }
+
+        /// <summary>Done with it: its file goes, and an unfinished video's ".part" with it.</summary>
+        public static void Forget(Video v)
+        {
+            try { File.Delete(Path.Combine(Dir, v.Pid + ".txt")); } catch (Exception) { }
+            if (!v.Running) { try { File.Delete(v.Out + ".part"); } catch (Exception) { } }
+        }
+
+        public static void Stop(IEnumerable<Video> videos)
+        {
+            foreach (var v in videos.Where(x => x.Running).ToList())
+            {
+                try { using (var pr = Process.GetProcessById(v.Pid)) { pr.Kill(); pr.WaitForExit(5000); } } catch (Exception) { }
+                v.Running = false;
+                Forget(v);
+            }
         }
     }
 
@@ -1051,11 +1244,26 @@ namespace SmoovPlay
         {
             var sb = new StringBuilder();
             sb.AppendLine($"SmoovPlay {BuildInfo.Version} diagnostics, {DateTime.Now:yyyy-MM-dd HH:mm}");
-            string product = Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "ProductName", "") as string;
-            string build = Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "CurrentBuild", "") as string;
-            sb.AppendLine($"Windows: {product} build {build}");
-            foreach (var c in SystemCheck.RunAll(p.Install, false))
+            const string nt = @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion";
+            string product = Registry.GetValue(nt, "ProductName", "") as string, build = Registry.GetValue(nt, "CurrentBuild", "") as string;
+            string release = Registry.GetValue(nt, "DisplayVersion", "") as string;
+            sb.AppendLine($"Windows: {WindowsName(product, build)}{(string.IsNullOrEmpty(release) ? "" : " " + release)} build {build}");
+            var prefs = Prefs.Load();
+            string kind = prefs.Where(f => f.StartsWith("source:")).Select(f => f.Substring(7)).FirstOrDefault() ?? "chiaki";
+            sb.AppendLine("Source: " + kind);
+            foreach (var c in SystemCheck.RunAll(p.Install, false, kind))
                 sb.AppendLine($"Check [{c.Level}] {c.Title}: {c.Value}. {c.Detail}");
+            if (kind == "capture" || CaptureDevices.Loaded)
+            {
+                if (!CaptureDevices.Loaded && p.RuntimeReady) CaptureDevices.Load(p);
+                sb.Append(CaptureDevices.Summary());
+                sb.Append(SystemCheck.CaptureHardware());
+            }
+            if (kind == "window" || AppWindows.Loaded)
+            {
+                if (!AppWindows.Loaded && p.RuntimeReady) AppWindows.Load(p);
+                sb.Append(AppWindows.Summary());
+            }
             sb.AppendLine("Install: " + p.Install + (p.Dev ? " (dev)" : ""));
             sb.AppendLine("Runtime: " + (File.Exists(p.Ready) ? File.ReadAllText(p.Ready).Trim() : "not ready"));
             sb.AppendLine("chiaki-ng: " + (Chiaki.Ours(p) != null ? "running (started by SmoovPlay)" : "not started by SmoovPlay")
@@ -1090,9 +1298,38 @@ namespace SmoovPlay
                 sb.AppendLine("Launcher errors (last 40 lines):");
                 foreach (var l in crash.Skip(Math.Max(0, crash.Length - 40))) sb.AppendLine(l);
             }
-            // Bug reports get pasted in public places: leave out the Windows user name.
-            string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            return sb.ToString().Replace(home, "%USERPROFILE%").Replace(home.Replace('\\', '/'), "%USERPROFILE%");
+            return Anonymize(sb.ToString(), Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+        }
+
+        /// <summary>A device name without its owner's: "Alex's iPhone Camera" becomes "(name)'s iPhone Camera".</summary>
+        public static string NoOwner(string name)
+        {
+            return Regex.Replace(name ?? "", @"[^\s()""]+['’]s\b", "(name)'s");
+        }
+
+        /// <summary>Windows 11 still calls itself "Windows 10 Pro" (and so on) in the registry's ProductName, so the build
+        /// number decides: 22000 and up is Windows 11.</summary>
+        public static string WindowsName(string product, string build)
+        {
+            product = string.IsNullOrEmpty(product) ? "Windows" : product;
+            return int.TryParse(build, out int b) && b >= 22000 ? Regex.Replace(product, @"\bWindows 10\b", "Windows 11") : product;
+        }
+
+        /// <summary>Bug reports get pasted in public places, so the Windows user name is left out: the user's folder
+        /// becomes %USERPROFILE% however a log spells it (pip writes it in lower case, JSON doubles the backslashes,
+        /// some tools use forward slashes or the short 8.3 name), and so does any other C:\Users\NAME folder.</summary>
+        public static string Anonymize(string text, string home)
+        {
+            const RegexOptions ic = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
+            const string sep = @"(?:\\\\|\\|/)";  // \\ (JSON), \ or /
+            if (!string.IsNullOrEmpty(home))
+            {
+                var parts = home.TrimEnd('\\', '/').Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length > 0)  // the whole folder name, so C:\Users\Al leaves C:\Users\Alice alone
+                    text = Regex.Replace(text, string.Join(sep, parts.Select(Regex.Escape)) + @"(?=$|[\\/""'\s:;,)\]])", "%USERPROFILE%", ic | RegexOptions.Multiline);
+            }
+            // Any other user folder: X:\Users\NAME (not Public or Default), whatever the case and separators
+            return Regex.Replace(text, @"\b[A-Za-z]:" + sep + "Users" + sep + @"(?!(?:Public|Default|All Users)(?:\\|/|""|$))[^\\/""\r\n]+", "%USERPROFILE%", ic | RegexOptions.Multiline);
         }
 
         /// <summary>run.py's PRIVATE_RESULTS line, in a test report that includes NVIDIA VFG.</summary>

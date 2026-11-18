@@ -4,7 +4,8 @@ The launcher writes one command per line to our stdin:
 
     set <key> <json value>    change a setting and save it, as if it were picked in the video window's menu
     restart                   apply restart-only settings now (the menu's "Restart now")
-    state                     print the current state again
+    quit                      stop, as Esc in the video window does (clips being saved are finished first)
+    state                   print the current state again
     look-show <look JSON>     show this look (the Looks page is editing it), whatever the Look settings say
     look-hide                 back to the Look settings' look
     looks-reload              the user's looks changed on disk: read them again (the list of looks is in the state)
@@ -49,8 +50,8 @@ class Remote:
                 self._q.put(line)
 
     def poll(self) -> str | None:
-        """Apply the commands that arrived since the last call (on the window's thread). Returns "restart" if one
-        asked for it."""
+        """Apply the commands that arrived since the last call (on the window's thread). Returns "quit" or "restart"
+        if one asked for it (quit first)."""
         out = None
         while True:
             try:
@@ -58,8 +59,10 @@ class Remote:
             except queue.Empty:
                 return out
             cmd, _, rest = line.partition(" ")
-            if cmd == "restart":
-                out = "restart"
+            if cmd == "quit":
+                out = "quit"
+            elif cmd == "restart":
+                out = out or "restart"
             elif cmd == "state":
                 self.publish()
             elif cmd == "set":

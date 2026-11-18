@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Management;
+using System.Text;
 using System.Net;
 using System.Net.Http;
 using System.Net.NetworkInformation;
@@ -107,9 +108,9 @@ namespace SmoovPlay
         }
 
         /// <summary>Everything, one after another (diagnostics, unattended setup).</summary>
-        public static List<Check> RunAll(string installDir, bool freshInstall)
+        public static List<Check> RunAll(string installDir, bool freshInstall, string source = "chiaki")
         {
-            var all = Plan();
+            var all = Plan(source);
             foreach (var c in all) Run(c, installDir, freshInstall);
             return all;
         }
@@ -464,6 +465,36 @@ namespace SmoovPlay
             if (names.Count == 0) c.Set(Level.Warn, "None found", "Connect the card with USB 3 (blue port) or fit it in a PCIe slot, then check again.");
             else c.Set(Level.Ok, names[0], names.Count > 1 ? $"And {names.Count - 1} more." : "Found.");
         }
+
+        /// <summary>For diagnostics: the capture hardware Windows has, whether or not its driver works, with its USB
+        /// vendor and product (VID:PID; never the serial number). Only devices named like a card or made by a capture
+        /// card maker: other cameras and sound devices can carry their owner's name.</summary>
+        public static string CaptureHardware()
+        {
+            var sb = new StringBuilder();
+            try
+            {
+                using (var q = new ManagementObjectSearcher("SELECT Name, PNPClass, PNPDeviceID, ConfigManagerErrorCode, Present FROM Win32_PnPEntity " +
+                                                            "WHERE PNPClass = 'Camera' OR PNPClass = 'Image' OR PNPClass = 'MEDIA' OR PNPClass = 'USB' OR PNPClass = 'AudioEndpoint'"))
+                    foreach (ManagementObject o in q.Get())
+                    {
+                        string name = o["Name"] as string ?? "", id = o["PNPDeviceID"] as string ?? "";
+                        var vidpid = Regex.Match(id, @"VID_([0-9A-F]{4})&PID_([0-9A-F]{4})", RegexOptions.IgnoreCase);
+                        bool maker = vidpid.Success && Regex.IsMatch(vidpid.Groups[1].Value, CaptureMakers, RegexOptions.IgnoreCase);
+                        if (!maker && !Regex.IsMatch(name, CaptureDevices.CardPattern, RegexOptions.IgnoreCase)) continue;
+                        uint code = o["ConfigManagerErrorCode"] is uint u ? u : 0;
+                        bool present = !(o["Present"] is bool pr) || pr;
+                        sb.AppendLine($"Capture hardware: {Diagnostics.NoOwner(name)} [{o["PNPClass"]}"
+                                      + (vidpid.Success ? $", {vidpid.Groups[1].Value.ToUpper()}:{vidpid.Groups[2].Value.ToUpper()}" : "") + "]: "
+                                      + (code == 0 ? "working" : $"problem code {code}") + (present ? "" : ", not connected"));
+                    }
+            }
+            catch (Exception e) { sb.AppendLine("Capture hardware: couldn't ask Windows (" + e.Message + ")"); }
+            return sb.Length > 0 ? sb.ToString() : "Capture hardware: none named like a card" + Environment.NewLine;
+        }
+
+        // USB vendor IDs of capture card makers: Elgato, AVerMedia, MacroSilicon (MS2109/MS2130 sticks: two IDs), Magewell, Razer
+        const string CaptureMakers = "^(0FD9|07CA|534D|345F|2935|1532)$";
 
         /// <summary>"2.4", "5" or "6" for the band the Wi-Fi is connected on, or null if unknown. Windows 11 prints a
         /// "Band : 6 GHz" line (the label is translated, the value isn't); older Windows only has the channel. The channel

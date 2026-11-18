@@ -40,6 +40,9 @@ import numpy as np
 from av.video.frame import PictureType
 
 ROOT = Path(__file__).resolve().parents[1]
+# A before & after video being made keeps a file here named after its process id, holding the video's path, so the
+# launcher knows. It carries on after the video window and the launcher close; updating SmoovPlay would stop it.
+SAVING_DIR = Path(os.environ.get("APPDATA", Path.home())) / "framegen" / "saving"
 TB = 90000  # MPEG-TS clock: every timestamp here is in 1/90000 s
 OFFSET = 10 * TB  # timestamps start 10 s in, so none is ever negative
 LENGTHS = (0, 30, 60, 120, 300)  # settings.replay's choices, in seconds (0: off)
@@ -379,8 +382,9 @@ class Recorder:
 
     def __init__(self, length_s: int = 0, clip: str = "smoovplay", layout: str = "split", out_dir: Path | None = None,
                  encoder: str | None = None, device: str = "auto", notify=None, hotkeys: bool = False,
-                 drop_when_behind: bool = True, size: tuple | None = None) -> None:
+                 drop_when_behind: bool = True, size: tuple | None = None, mark_dir: Path | None = None) -> None:
         self.clip, self.layout = clip, layout
+        self.mark_dir = mark_dir  # SAVING_DIR when SmoovPlay runs it: before & after videos say they're being made
         self.size = (size[0] & ~1, size[1] & ~1) if size else None
         self._prep_lock = threading.Lock()
         self.out_dir = Path(out_dir) if out_dir is not None else None
@@ -420,7 +424,9 @@ class Recorder:
         self._skip_s = 0.0
         self._drifts: deque = deque()
         self._warned: set = set()
-        self._saves: list[threading.Thread] = []
+        self._cv = threading.Condition()
+        self._quick = 0  # saves still writing their clip (a before & after video then goes to a process of its own)
+        self._making: list[subprocess.Popen] = []  # before & after videos' processes
         self._worker = threading.Thread(target=self._work, name="replay", daemon=True)
         self._worker.start()
         self.set_length(length_s)
@@ -814,20 +820,32 @@ class Recorder:
             return []
         if wait:
             return self._save(kind, layout)
-        t = threading.Thread(target=self._save, args=(kind, layout), name="replay-save")  # not a daemon: a save
-        self._saves = [s for s in self._saves if s.is_alive()] + [t]  # under way finishes even if play stops
+        # A daemon: close() waits for the clip itself, and a before & after video carries on in its own process.
+        t = threading.Thread(target=self._save, args=(kind, layout, True), name="replay-save", daemon=True)
+        with self._cv:
+            self._quick += 1
         t.start()
         return []
 
-    def _save(self, kind: str, layout: str) -> list:
+    def _save(self, kind: str, layout: str, counted: bool = False) -> list:
+        handed = threading.Event()
+
+        def handoff() -> None:  # the clip is written: close() needn't wait for this save any more
+            if counted and not handed.is_set():
+                handed.set()
+                with self._cv:
+                    self._quick -= 1
+                    self._cv.notify_all()
         try:
-            return self._save_inner(kind, layout)
+            return self._save_inner(kind, layout, handoff)
         except Exception as e:  # noqa: BLE001 - e.g. a full disk
             print(f"[replay] save failed: {type(e).__name__}: {e}")
             self._notify(f"Couldn't save the replay: {str(e)[:120]}", 8.0)
             return []
+        finally:
+            handoff()
 
-    def _save_inner(self, kind: str, layout: str) -> list:
+    def _save_inner(self, kind: str, layout: str, handoff=lambda: None) -> list:
         self.flush(1.0)
         with self._lock:
             snap = {n: (tr.head, list(tr.ring)) for n, tr in self.tracks.items()}
@@ -874,21 +892,31 @@ class Recorder:
             if sound is not None and sound[1]:
                 _write_ts(tmp / "sound.ts", *sound)
                 cmd += ["--sound", str(tmp / "sound.ts")]
+            if self.mark_dir is not None:
+                cmd += ["--mark", str(self.mark_dir)]
             self._notify(f"Making a before & after video of the last {_dur(secs)} in the background. "
                          "Keep playing.", 6.0)
-            print(f"[replay] before & after of {secs:.1f} s: {' '.join(cmd[1:4])} ...")
             flags = 0
             if sys.platform == "win32":
                 flags = subprocess.BELOW_NORMAL_PRIORITY_CLASS | subprocess.CREATE_NO_WINDOW
             t0 = time.perf_counter()
-            r = subprocess.run(cmd, cwd=ROOT, creationflags=flags, capture_output=True, text=True,
-                               encoding="utf-8", errors="replace")
-            if r.returncode == 0 and path.exists():
+            # A process of its own, which carries on if play stops or SmoovPlay closes: only its result waits here.
+            proc = subprocess.Popen(cmd, cwd=ROOT, creationflags=flags, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                                    errors="replace")
+            with self._lock:
+                self._making = [p for p in self._making if p.poll() is None] + [proc]
+            print(f"[replay] before & after of {secs:.1f} s: being made in the background (process {proc.pid})")
+            handoff()
+            out, _ = proc.communicate()
+            if self.mark_dir is not None:  # reported here, so the launcher needn't
+                (Path(self.mark_dir) / f"{proc.pid}.txt").unlink(missing_ok=True)
+            if proc.returncode == 0 and path.exists():
                 print(f"[replay] saved before & after -> {path} ({time.perf_counter() - t0:.0f} s)")
                 self._notify(f"Saved before & after: {_short(path)}", 8.0)
                 saved.append(path)
             else:
-                print(f"[replay] before & after failed ({r.returncode}): {(r.stdout + r.stderr)[-800:]}")
+                print(f"[replay] before & after failed ({proc.returncode}): {(out or '')[-800:]}")
                 self._notify("Couldn't make the before & after video (see the log)", 8.0)
                 shutil.rmtree(tmp, ignore_errors=True)
         return saved
@@ -907,14 +935,25 @@ class Recorder:
             print(text)
 
     def close(self, wait_saves: float = 0.0) -> None:
+        """Stops recording. A clip being saved is finished first (waiting up to wait_saves seconds); a before & after
+        video being made carries on in its own process, and isn't waited for."""
         if self._hotkeys is not None:
             self._hotkeys.stop()
             self._hotkeys = None
         self.length = 0
         self._q.put(_STOP)
         self._worker.join(timeout=5)
-        for t in self._saves:
-            t.join(timeout=wait_saves)
+        end = time.monotonic() + wait_saves
+        with self._cv:
+            while self._quick > 0 and time.monotonic() < end:
+                self._cv.wait(max(0.0, end - time.monotonic()))
+            unfinished = self._quick
+        if unfinished:
+            print(f"[replay] {unfinished} clip(s) weren't finished saving after {wait_saves:.0f} s")
+        with self._lock:
+            making = sum(1 for p in self._making if p.poll() is None)
+        if making:
+            print(f"[replay] {making} before & after video(s) still being made: they carry on in the background")
         if self.dropped:
             print(f"[replay] frames dropped (the encoder fell behind): {self.dropped}")
 
@@ -1119,14 +1158,37 @@ def main(argv=None) -> int:
     c.add_argument("--labels", nargs=2, default=["Original", "SmoovPlay"])
     c.add_argument("--encoder", default=None)
     c.add_argument("--cleanup", metavar="FOLDER", help="delete this folder (the tracks) when done")
+    c.add_argument("--mark", metavar="FOLDER", help="keep FOLDER/<process id>.txt (the video's path) while making it, "
+                   "for the launcher; if it fails, the file stays, with why")
     a = ap.parse_args(argv)
+    mark = None
+    if a.mark:
+        try:
+            Path(a.mark).mkdir(parents=True, exist_ok=True)
+            mark = Path(a.mark) / f"{os.getpid()}.txt"
+            mark.write_text(a.out + "\n", encoding="utf-8")
+        except OSError:
+            mark = None
     try:
         secs = compose(a.after, a.before, a.out, a.sound, a.layout, tuple(a.labels), a.encoder or None)
-        print(f"[replay] before & after: {secs:.1f} s -> {a.out}")
-        return 0
+    except BaseException as e:
+        Path(a.out + ".part").unlink(missing_ok=True)
+        if mark is not None:
+            try:
+                mark.write_text(f"{a.out}\nfailed: {type(e).__name__}: {str(e)[:300]}\n", encoding="utf-8")
+            except OSError:
+                pass
+        raise
     finally:
         if a.cleanup:
             shutil.rmtree(a.cleanup, ignore_errors=True)
+    if mark is not None:
+        mark.unlink(missing_ok=True)
+    try:
+        print(f"[replay] before & after: {secs:.1f} s -> {a.out}")
+    except OSError:  # SmoovPlay has closed meanwhile: nobody is reading
+        pass
+    return 0
 
 
 if __name__ == "__main__":

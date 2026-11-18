@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import re
 import sys
@@ -87,8 +88,11 @@ def _dshow_log(url: str, options: dict) -> str:
 
 
 def parse_devices(text: str) -> list[Device]:
-    """Devices from `-list_devices true` output. FFmpeg 5+ tags each device '"Name" (video)'; older versions put
-    them under "DirectShow video devices" / "DirectShow audio devices" headings. Both are read."""
+    """Devices from `-list_devices true` output. FFmpeg 5+ tags each device with the kinds of output it has:
+    '"Name" (video)', '(audio)', '(none)' when it couldn't look, or several, '(video, audio)' or '(video, unknown)',
+    as cards that also carry their sound (or a stream FFmpeg has no name for) show. Older versions put devices
+    under "DirectShow video devices" / "DirectShow audio devices" headings. Both are read, and any device with
+    video counts as video."""
     out: list[Device] = []
     heading = "unknown"
     for line in text.splitlines():
@@ -100,15 +104,133 @@ def parse_devices(text: str) -> list[Device]:
         elif m := re.match(r'\s*Alternative name "(.*)"\s*$', line):
             if out:
                 out[-1] = Device(out[-1].name, out[-1].kind, m.group(1))
-        elif m := re.match(r'\s*"(.*)"\s*(?:\((video|audio|none|video,audio|audio,video)\))?\s*$', line):
-            kind = m.group(2) or heading
-            kind = {"none": "unknown", "video,audio": "video", "audio,video": "video"}.get(kind, kind)
+        elif m := re.match(r'\s*"(.*)"\s*(?:\(([a-z, ]*)\))?\s*$', line):
+            kinds = {k.strip() for k in m.group(2).split(",")} if m.group(2) is not None else {heading}
+            kind = "video" if "video" in kinds else "audio" if "audio" in kinds else "unknown"
             out.append(Device(m.group(1), kind))
     return out
 
 
+# DirectShow's device list (ole32's System Device Enumerator), read through its COM interfaces with ctypes
+_CLSID_SYSTEM_DEVICE_ENUM = "{62BE5D10-60EB-11D0-BD3B-00A0C911CE86}"
+_IID_ICREATE_DEV_ENUM = "{29840822-5B84-11D0-BD3B-00A0C911CE86}"
+_IID_IPROPERTY_BAG = "{55272A00-42CB-11CE-8135-00AA004BB851}"
+_CATEGORIES = (("video", "{860BB310-5D01-11D0-BD3B-00A0C911CE86}"),  # CLSID_VideoInputDeviceCategory
+               ("audio", "{33D9A762-90C8-11D0-BD43-00A0C911CE86}"))  # CLSID_AudioInputDeviceCategory
+
+
+def dshow_names() -> list[Device]:
+    """The video and audio input devices DirectShow lists, by the names FFmpeg opens them by, read from Windows'
+    device list (each device's property bag) without loading any device's driver. OSError if DirectShow can't be
+    asked.
+
+    FFmpeg's own listing (-list_devices) also opens every device to see what it carries, so one faulty camera or
+    virtual-camera driver can crash or hang it, and SmoovPlay with it, before any card is listed. OBS lists names
+    this way first for the same reason. Opening a card by name (CardSource.open) loads only that card's driver."""
+    import ctypes
+    import uuid
+    from ctypes import wintypes as wt
+
+    ole32, oleaut32 = ctypes.WinDLL("ole32"), ctypes.WinDLL("oleaut32")
+    ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+    oleaut32.VariantClear.argtypes = [ctypes.c_void_p]
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("bytes", ctypes.c_ubyte * 16)]
+
+    class VARIANT(ctypes.Structure):  # 24 bytes on 64-bit Windows: the type, 6 reserved bytes, then the value
+        _fields_ = [("vt", ctypes.c_ushort), ("r1", ctypes.c_ushort), ("r2", ctypes.c_ushort), ("r3", ctypes.c_ushort),
+                    ("value", ctypes.c_void_p), ("value2", ctypes.c_void_p)]
+
+    def guid(s: str) -> GUID:
+        g = GUID()
+        ctypes.memmove(g.bytes, uuid.UUID(s).bytes_le, 16)
+        return g
+
+    def call(obj, index: int, *args, argtypes=()):
+        """Method `index` of a COM object's table (0-2: QueryInterface, AddRef, Release), returning its HRESULT."""
+        table = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+        return ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, *argtypes)(table[index])(obj, *args)
+
+    def release(obj) -> None:
+        if obj:
+            call(obj, 2)
+
+    def check(hr: int, what: str) -> None:
+        if hr < 0:
+            raise OSError(f"DirectShow: {what} failed (0x{hr & 0xFFFFFFFF:08X})")
+
+    init = ole32.CoInitializeEx(None, 2)  # COINIT_APARTMENTTHREADED, as FFmpeg's DirectShow input uses
+    if init < 0 and init & 0xFFFFFFFF != 0x80010106:  # RPC_E_CHANGED_MODE: COM is already set up another way: works
+        check(init, "CoInitializeEx")
+    out: list[Device] = []
+    enum = ctypes.c_void_p()
+    try:
+        check(ole32.CoCreateInstance(ctypes.byref(guid(_CLSID_SYSTEM_DEVICE_ENUM)), None, 1,  # CLSCTX_INPROC_SERVER
+                                     ctypes.byref(guid(_IID_ICREATE_DEV_ENUM)), ctypes.byref(enum)), "CoCreateInstance")
+        for kind, category in _CATEGORIES:
+            monikers = ctypes.c_void_p()
+            hr = call(enum, 3, ctypes.byref(guid(category)), ctypes.byref(monikers), 0,  # CreateClassEnumerator
+                      argtypes=(ctypes.c_void_p, ctypes.c_void_p, wt.DWORD))
+            check(hr, "CreateClassEnumerator")
+            if not monikers:  # S_FALSE: nothing in this category
+                continue
+            try:
+                for _ in range(256):
+                    m, got = ctypes.c_void_p(), wt.ULONG()
+                    if call(monikers, 3, 1, ctypes.byref(m), ctypes.byref(got),  # IEnumMoniker::Next
+                            argtypes=(wt.ULONG, ctypes.c_void_p, ctypes.c_void_p)) != 0 or not m:
+                        break
+                    try:
+                        bag = ctypes.c_void_p()
+                        iid = guid(_IID_IPROPERTY_BAG)
+                        if call(m, 9, None, None, ctypes.byref(iid), ctypes.byref(bag),  # IMoniker::BindToStorage
+                                argtypes=(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)) < 0:
+                            continue  # OBS and FFmpeg skip a device without a property bag too
+                        try:
+                            v = VARIANT()
+                            if call(bag, 3, "FriendlyName", ctypes.byref(v), None,  # IPropertyBag::Read
+                                    argtypes=(wt.LPCWSTR, ctypes.c_void_p, ctypes.c_void_p)) < 0:
+                                continue
+                            name = ctypes.wstring_at(v.value) if v.vt == 8 and v.value else ""  # VT_BSTR
+                            oleaut32.VariantClear(ctypes.byref(v))
+                        finally:
+                            release(bag)
+                        alt, ctx, shown = "", ctypes.c_void_p(), ctypes.c_void_p()
+                        if ole32.CreateBindCtx(0, ctypes.byref(ctx)) >= 0:
+                            if call(m, 20, ctx, None, ctypes.byref(shown),  # IMoniker::GetDisplayName
+                                    argtypes=(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)) >= 0 and shown:
+                                alt = ctypes.wstring_at(shown).replace(":", "_")  # FFmpeg's "Alternative name"
+                                ole32.CoTaskMemFree(shown)
+                            release(ctx)
+                        if name:
+                            out.append(Device(name, kind, alt))
+                    finally:
+                        release(m)
+            finally:
+                release(monikers)
+    finally:
+        release(enum)
+        if init >= 0:
+            ole32.CoUninitialize()
+    return out
+
+
 def list_devices() -> list[Device]:
-    return parse_devices(_dshow_log("dummy", {"list_devices": "true"}))
+    """The capture devices Windows has, by name (dshow_names), or from FFmpeg's own listing if DirectShow's list
+    can't be read that way. An empty video list is looked at once more after half a second: a card can be missing
+    for a moment while its driver starts, or while another app lets it go."""
+    devices: list[Device] = []
+    for attempt in range(2):
+        if attempt:
+            time.sleep(0.5)
+        try:
+            devices = dshow_names()
+        except OSError:
+            devices = parse_devices(_dshow_log("dummy", {"list_devices": "true"}))
+        if any(d.kind == "video" for d in devices):
+            break
+    return devices
 
 
 # Words in device names that say nothing about which card it is.
@@ -136,7 +258,11 @@ def pick_audio(video: str, devices: list[Device]) -> str | None:
     return best[1] if best[0] > 0 and sum(n == best[0] for n, _ in scored) == 1 else None
 
 
-_MODE = re.compile(r"(?:pixel_format=(?P<pix>\S+)|vcodec=(?P<codec>\S+))\s+"
+# FourCCs FFmpeg's DirectShow input lists as "unknown compression type" but that are worth knowing about: a card's
+# 10-bit HDR format, which FFmpeg can't capture (its DirectShow input has no P010), so such modes are noted, not used
+_UNREADABLE = {0x30313050: "p010", 0x36313050: "p016"}
+_MODE = re.compile(r"(?:pixel_format=(?P<pix>\S+)|vcodec=(?P<codec>\S+)"
+                   r"|unknown compression type (?P<fourcc>0x[0-9A-Fa-f]+))\s+"
                    r"min s=(?P<w0>\d+)x(?P<h0>\d+) fps=(?P<f0>[\d.e+-]+)\s+"
                    r"max s=(?P<w1>\d+)x(?P<h1>\d+) fps=(?P<f1>[\d.e+-]+)"
                    r"(?:\s*\((?P<color>[^)]*)\))?")
@@ -149,6 +275,8 @@ def parse_modes(text: str) -> list[Mode]:
     Each line becomes one Mode at its largest size (cards list one line per size). Duplicates are dropped."""
     modes: list[Mode] = []
     for m in _MODE.finditer(text):
+        if m.group("fourcc") is not None and int(m.group("fourcc"), 16) not in _UNREADABLE:
+            continue
         raw = m.group("pix") is not None
         rng = space = ""
         if m.group("color"):
@@ -157,11 +285,48 @@ def parse_modes(text: str) -> list[Mode]:
             if len(parts) > 1:
                 space = parts[1].split("/")[0]
                 space = "" if space == "unknown" else space
-        mode = Mode(m.group("pix") or m.group("codec"), raw, int(m.group("w1")), int(m.group("h1")),
+        fmt = m.group("pix") or m.group("codec") or _UNREADABLE[int(m.group("fourcc"), 16)]
+        mode = Mode(fmt, raw, int(m.group("w1")), int(m.group("h1")),
                     float(m.group("f0")), float(m.group("f1")), rng, space)
         if mode not in modes:
             modes.append(mode)
     return modes
+
+
+def open_failure(device: str, log: str, error: str) -> str:
+    """Why a card wouldn't open, in plain words, from FFmpeg's DirectShow messages; "" when they don't say."""
+    text = f"{log}\n{error}"
+    if "Could not run graph" in text or "Could not RenderStream" in text or "0X800700AA" in text.upper():  # ERROR_BUSY
+        return (f"{device} is in use by another app. Close OBS, Elgato's apps (also in the tray by the clock), "
+                "Discord, a browser tab using the camera, or anything else that shows the card, then press Play "
+                "again: many cards, Elgato's USB ones among them, work with one app at a time")
+    if "E_ACCESSDENIED" in text or "0X80070005" in text.upper() or "access is denied" in text.lower():
+        return (f"Windows wouldn't let SmoovPlay open {device}. Turn on Settings > Privacy & security > Camera > "
+                "Let desktop apps access your camera (and the same for Microphone), then press Play again")
+    if "Could not find video device" in text:
+        return f"Windows no longer lists {device}: reconnect the card, then press Look again on the Play page"
+    if "Could not set video options" in text:
+        return f"{device} refused the video format SmoovPlay asked for"
+    return ""
+
+
+def _open_card(device: str, opts: dict):
+    """av.open for a card's picture, with a plain-words reason when it fails (open_failure)."""
+    import av
+    import av.logging
+    old = av.logging.get_level()
+    av.logging.set_level(av.logging.WARNING)
+    try:
+        with av.logging.Capture() as logs:
+            try:
+                return av.open(f"video={device}", format="dshow", options=opts)
+            except Exception as e:  # noqa: BLE001 - reworded below when FFmpeg's messages say why
+                why = open_failure(device, "".join(msg for _, name, msg in logs if name == "dshow"), str(e))
+                if why:
+                    raise RuntimeError(why) from e
+                raise
+    finally:
+        av.logging.set_level(old)
 
 
 def list_modes(device: str) -> list[Mode]:
@@ -195,6 +360,12 @@ def pick_mode(modes: list[Mode], w: int = 1920, h: int = 1080, fps: float = 60.0
         notes.append(f"no mode reaches {fps:g} fps at that size (best {best.fps_max:g})")
     if not best.raw:
         notes.append(f"only {best.fmt.upper()} (compressed) at that size and rate: decoded on the GPU where it can be")
+    if all(m.w * m.h <= 1280 * 720 and m.fps_max <= 30.5 for m in usable) and (w * h > 1280 * 720 or fps > 30.5):
+        notes.append("the card offers 1280x720 at 30 fps at most, as cards do on a USB 2 port: connect it to a USB 3 "
+                     "port (blue, ideally on the back of the PC)")
+    if any(m.fmt in _UNREADABLE.values() for m in modes):
+        notes.append("the card also offers 10-bit HDR, which SmoovPlay can't read yet, so it uses 8-bit "
+                     f"{best.fmt.upper()}: if the picture looks washed out, turn HDR off on the console")
     return best, "; ".join(notes)
 
 
@@ -341,7 +512,7 @@ class CardSource:
             except Exception as e:  # noqa: BLE001 - busy or gone: the picture on its own
                 print(f"[capture] couldn't open the sound device ({str(e)[:120]}); playing without sound")
         if container is None:
-            container = av.open(f"video={device}", format="dshow", options=opts)
+            container = _open_card(device, opts)
         return cls(container, f"Capture card ({device})", live=True, range_hint=mode.range, audio=audio, **kw)
 
     @classmethod
@@ -580,6 +751,9 @@ def _cuda_device() -> str | None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--list", action="store_true", help="the capture devices Windows has")
+    ap.add_argument("--raw", action="store_true",
+                    help="with --list: FFmpeg's own listing, as it prints it (it opens every device, so a faulty "
+                         "driver shows up here)")
     ap.add_argument("--formats", metavar="NAME", help="what a video device offers, and what SmoovPlay would pick")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
@@ -594,17 +768,30 @@ def main(argv: list[str] | None = None) -> int:
                 print(("* " if m == best else "  ") + m.label())
             print(note or ("would use " + best.label() if best else "nothing usable"))
         return 0
-    devices = list_devices()
+    if a.list and a.raw:
+        print(_dshow_log("dummy", {"list_devices": "true"}) or "FFmpeg listed nothing")
+        return 0
+    error = None
+    try:
+        devices = list_devices()
+    except Exception as e:  # noqa: BLE001 - said in the list (the launcher's diagnostics show it), not a crash
+        devices, error = [], f"{type(e).__name__}: {e}"
     if a.json:
         print(json.dumps({"video": [asdict(d) for d in devices if d.kind in ("video", "unknown")],
-                          "audio": [asdict(d) for d in devices if d.kind == "audio"]}))
+                          "audio": [asdict(d) for d in devices if d.kind == "audio"]}
+                         | ({"error": error} if error else {})))
     else:
         for d in devices:
             print(f"{d.kind:7}  {d.name}")
         if not devices:
-            print("no capture devices found")
+            print("no capture devices found" + (f" ({error})" if error else ""))
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    code = main()
+    # Leave without Python's clean-up: a camera driver that crashes as it's unloaded at exit would turn a list that's
+    # already out into a failure for the launcher
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)

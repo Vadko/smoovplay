@@ -126,7 +126,7 @@ Uninstall (Help → Uninstall, or Apps & features) removes only what setup creat
 
 The launcher finds new releases on GitHub and, with a click, installs them itself.
 
-**Finding one.** When the launcher opens, it asks GitHub for the newest release in `RELEASES_REPO` (set in `build.py`; empty turns updates off). Drafts are skipped; pre-releases count, so betas can go out as pre-releases. Tags are versions: `v0.2.0`, `v0.2.0-beta.2`. The answer is cached for 20 hours in `%APPDATA%\framegen\smoovplay-update.txt`, and the request carries only the app's version, in its User-Agent. A newer release shows **Update available: v0.2.0** under the version in the rail, and the Help page mentions it too.
+**Finding one.** When the launcher opens, it asks GitHub for the newest release in `RELEASES_REPO` (set in `build.py`; empty turns updates off). Drafts are skipped; pre-releases count, so betas can go out as pre-releases. Tags are versions: `v0.2.0`, `v0.2.0-beta.2`. The answer is cached for 6 hours in `%APPDATA%\framegen\smoovplay-update.txt` (shared by every install), and the request carries only the app's version, in its User-Agent. **Check for updates** under the version in the rail asks again straight away. A newer release shows **Update available: v0.2.0** there instead, and the Help page mentions it too.
 
 **Installing it.** Clicking that line asks **Update to v0.2.0?** (Update now, What's new, Later). Update now:
 

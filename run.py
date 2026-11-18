@@ -203,6 +203,27 @@ def sound_player():
     return Player
 
 
+FRAME_LOGS_KEPT = 10
+
+
+def frame_log(results: str | None) -> str | None:
+    """Played from the launcher (--results): a per-frame log of the stream next to the session's own (frames-<the
+    session's time>.csv: sizes, timing and the pipeline's calls, no pictures; about 1.5 MB per 5 min), for tuning
+    the repeat check on real games. The last FRAME_LOGS_KEPT are kept."""
+    if not results:
+        return None
+    r = Path(results)
+    stamp = r.stem.split("-", 1)[1] if "-" in r.stem else r.stem
+    try:
+        for old in sorted(r.parent.glob("frames-*.csv"))[:-(FRAME_LOGS_KEPT - 1)]:
+            old.unlink()
+    except OSError:
+        pass
+    path = r.parent / f"frames-{stamp}.csv"
+    print(f"[run] frame log -> {path.name}")
+    return str(path)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("video", nargs="?", help="input video file")
@@ -214,6 +235,10 @@ def main() -> int:
     ap.add_argument("--window", metavar="APP",
                     help="--source window: the app's window, as a preset (ps-remote-play, xbox, moonlight), exe:NAME, "
                          "hwnd:N or part of its title (framegen/window.py, Experimental)")
+    ap.add_argument("--window-keys", metavar="KEYS", default=None,
+                    help="--source window: SmoovPlay's shortcuts while the app has the keys, as "
+                         '"menu=Ctrl+Alt+K;quit=Ctrl+Alt+End" (actions: menu, quit, fullscreen, stats, smooth; the '
+                         'others keep their defaults, framegen/hotkeys.py)')
     ap.add_argument("--capture", metavar="NAME|N|FILE",
                     help="a capture card by name or number (from --list-devices), or a video file standing in for "
                          "one (played in real time through the capture path, to test it without a card)")
@@ -308,6 +333,7 @@ def main() -> int:
                     help="when test mode (a simulated 30 fps game) or --score was used, write a plain-language report "
                          "of performance and quality here: every 10 s while playing, and at the end")
     a = ap.parse_args()
+    window_keys = None  # --source window: the shortcuts picked (framegen/hotkeys.py)
 
     if a.list_devices:
         from framegen.capture import main as capture_main
@@ -356,8 +382,8 @@ def main() -> int:
         if not a.chiaki_tap:  # chiaki-ng itself (tests use another tap): its codec, before it starts a stream
             from framegen.chiaki_settings import match_codec
             match_codec(settings.hdr, nvidia=not dml_mode)
-        src = ChiakiSource(a.chiaki_decoder, wait_s=600, log_path=a.chiaki_log, tap_name=a.chiaki_tap or NAME,
-                           test=test)
+        src = ChiakiSource(a.chiaki_decoder, wait_s=600, log_path=a.chiaki_log or frame_log(a.results),
+                           tap_name=a.chiaki_tap or NAME, test=test)
     elif kind == "capture":
         if a.capture is None:
             ap.error("--source capture needs --capture N (a device) or --capture FILE")
@@ -366,6 +392,11 @@ def main() -> int:
     elif kind == "window":
         if not a.window:
             ap.error("--source window needs --window APP (python -m framegen.window --list shows the windows)")
+        from framegen.hotkeys import parse_arg
+        try:
+            window_keys = parse_arg(a.window_keys)
+        except ValueError as e:
+            ap.error(f"--window-keys: {e}")
         from framegen.sources import Clock60
         from framegen.window import open_window
         try:
@@ -552,6 +583,7 @@ def main() -> int:
     window = (WindowSink(src.w, src.h) if a.display_cv else
               GLWindowSink(src.w, src.h, settings, restart_reasons, choices, unavailable,
                            overlay_of=src.where if kind == "window" else None, hdr=hdr10[0],
+                           window_keys=window_keys if kind == "window" else None,
                            hdr_peak=min(hdr_peak or 1e9, 1000.0)) if a.display else None)
     if hdr10[0] and not getattr(window, "hdr10", False):  # the window couldn't present HDR10: shown in SDR
         hdr10[0], hdr_out, hdr_peak = False, "sdr8", None
@@ -603,6 +635,8 @@ def main() -> int:
             print(f"[run] chiaki-ng showed its window again: minimised it ({len(back)})")
 
     settings.watch(minimize_chiaki)
+    if isinstance(window, GLWindowSink):
+        window.take_keys()  # before chiaki-ng goes down, while it's in front to take them from
     minimize_chiaki()
     if isinstance(window, GLWindowSink):
         window.settle_hook = keep_chiaki_down
@@ -611,9 +645,10 @@ def main() -> int:
     # setting doesn't lose what's held.
     replay = None
     if sink.sinks:
-        from framegen.replay import Recorder
+        from framegen.replay import SAVING_DIR, Recorder
         replay = Recorder(settings.replay, clip=settings.replay_save, layout=settings.replay_layout,
-                          notify=getattr(sink, "toast", None), hotkeys=True, size=(src.w, src.h))
+                          notify=getattr(sink, "toast", None), hotkeys=True, size=(src.w, src.h),
+                          mark_dir=SAVING_DIR)
         replay.warm_up()  # its encoders open now, not during play
         if hdr10[0]:  # clips are SDR: HDR10 frames are tone-mapped as they go in, as "shown in SDR" would show them
             from framegen.hdr import pq16_to_sdr8
@@ -746,14 +781,19 @@ def main() -> int:
             if hasattr(src, "hold"):
                 src.hold(False)
     finally:
-        if replay is not None:
-            replay.close(wait_saves=30)  # a clip being saved is finished first
-        sink.close()
+        # The video window goes at once: a window left up while clips finish saving looks frozen (and Windows
+        # offers to end it, which stops the save).
+        for s in getattr(sink, "sinks", [sink]):
+            if hasattr(s, "hide"):
+                s.hide()
         if kind == "chiaki" and hasattr(src, "set_audio_delay"):
             src.set_audio_delay(0)  # chiaki-ng's sound back on time (it would also lapse once we stop)
         if hidden:
             from framegen.winutil import SW_RESTORE, show
             show(hidden, SW_RESTORE)
+        if replay is not None:
+            replay.close(wait_saves=30)  # a clip being saved is finished first; before & after carries on alone
+        sink.close()
         src.close()
         stop_results.set()
         if results_thread.is_alive():

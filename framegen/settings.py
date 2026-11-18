@@ -83,6 +83,18 @@ SPECS: tuple[Spec, ...] = (
               "games aren't affected. Experimental: not tried with a real game yet.",
          impact={"picture": "Even motion in 40-60 fps games, instead of stutter.",
                  "speed": "About one frame (17 ms) more delay than showing their frames as they come."}),
+    # framegen/cadence.py RhythmLock. Auto reads the game's frame rate from the stream (sizes, the picture), which a
+    # still or dark scene can fool (Gotham Knights, locked at 30, read as 38-47 fps on PS5 Remote Play).
+    Spec("game_fps", "Game frame rate", ("auto", "30"), "auto", {"auto": "Auto", "30": "30 fps"}, group="Smoothness",
+         applies=("interp", (True,)),
+         hints={"auto": "SmoovPlay works out the game's frame rate as it plays. The default.",
+                "30": "For a game locked at 30\u00a0fps. Every other frame is taken as new, so nothing can misread it."},
+         help="Auto works out the game's frame rate from the stream as it plays. A still or dark scene can fool it "
+              "into reading a 30 fps game as 40 or more, which makes motion uneven. If you know the game is locked "
+              "at 30 fps (most console quality modes), pick 30 fps: every other frame is taken as new, so motion "
+              "stays even. Menus that run at 60 fps look a little less smooth with it.",
+         impact={"picture": "Even motion in a game locked at 30 fps, whatever the scene.",
+                 "speed": "None. At most one frame (17 ms) later for a moment after the game stutters."}),
     # RIFE: only the model SmoovPlay is tuned and tested with (setup prepares it). interpolator.MODELS has more, for
     # testing with run.py --model; one becomes a choice here once it's tested in real time and setup prepares it.
     # NVIDIA VFG (framegen/vfg.py): offered once the user has set it up on the launcher's Settings page. Its licence

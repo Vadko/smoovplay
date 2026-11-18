@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 from . import delaytest
-from .cadence import Action, CadenceScheduler, CutDetector, DuplicateDetector, FrameTimeline
+from .cadence import Action, CadenceScheduler, CutDetector, DuplicateDetector, FrameTimeline, RhythmLock
 from .hdr import level8, to_u8
 from .interpolator import STEADY_HUD_THRESHOLD, RifeInterpolator
 from .io import TICK, MiniText, Waiting
@@ -296,9 +296,9 @@ class Stats:
         elif interp:
             lines.append("Quality: not measured yet (it's measured at 60 and 120 fps output; 90 fps has no real "
                          "frame to compare with)")
-        if self.uneven_ticks:
-            lines.append(f"Game: for {self.uneven_ticks / 60:.0f} s it ran at about {np.median(self.uneven_fps):.0f} "
-                         "fps, between 30 and 60, and its frames were evened out (Even out 40-60 fps)")
+        if self.uneven_ticks:  # (no figure: its median can round to 60, which read "about 60 fps, between 30 and 60")
+            lines.append(f"Game: for {self.uneven_ticks / 60:.0f} s it ran between 30 and 60 fps, and its frames were "
+                         "evened out (Even out 40-60 fps)")
         lines += list(self.delay_tests)
         if not interp:
             lines.append("Verdict: frame generation was off, so there's nothing to judge")
@@ -401,6 +401,7 @@ class Pipeline:
         reached: tuple = ()  # timed: the frames whose time came with the frame about to be shown
         audio_next, audio_ms = 0.0, None  # when the sound delay is next looked at, and what chiaki-ng was last told
         replay_next = 0.0  # when instant replay is next told the delay
+        rhythm, rhythm_moves, rhythm_note = None, 0, 0.0  # Game frame rate 30 fps: the lock, its moves, next note
         off_since: float | None = None  # since when the game has been off the rate that's needed
         note, toasted = "", set()
 
@@ -515,6 +516,21 @@ class Pipeline:
             diff = self.detector.update(it.in_u8)
             # A source that knows better (Remote Play: compressed frame size) overrides the image check.
             is_new = diff.is_new if tick.new_hint is None else tick.new_hint
+            # Game frame rate set to 30 fps: every other tick is new, the checks only choosing which (not in test
+            # mode, which decides itself what's new)
+            lock30 = (settings is not None and getattr(settings, "game_fps", "auto") == "30"
+                      and "game_new" not in tick.extra)
+            if lock30 != (rhythm is not None):
+                rhythm = RhythmLock() if lock30 else None
+                print(f"[pipeline] game frame rate: {'30 fps (every other frame is new)' if lock30 else 'Auto'}")
+            if rhythm is not None:
+                is_new = rhythm.update(is_new, tick.extra.get("size"), bool(tick.extra.get("keyframe")),
+                                       tick.extra.get("seq"))
+                if rhythm.moves != rhythm_moves:
+                    rhythm_moves = rhythm.moves
+                    if t0 >= rhythm_note:  # the game stuttered: its frames moved by a tick
+                        rhythm_note = t0 + 10.0
+                        print(f"[pipeline] 30 fps: the game's frames moved by a tick ({rhythm_moves} so far)")
             seen_rate.add(is_new)
             # In test mode the source's own word on the game's frame (TestMode puts it in extra["game_new"]).
             game_new = tick.extra["game_new"] if "game_new" in tick.extra else is_new

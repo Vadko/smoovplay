@@ -238,6 +238,7 @@ namespace SmoovPlay
             Window.Activated += (s, e) => UpdateAmbient();
             Window.Deactivated += (s, e) => UpdateAmbient();
             Window.StateChanged += (s, e) => UpdateAmbient();
+            Window.PreviewKeyDown += OnKeysPressed;  // App window mode's keys, being changed (BuildKeys)
             Window.KeyDown += (s, e) =>
             {
                 if (E("Dialog").Visibility == Visibility.Visible && e.Key == Key.Escape) { CloseDialog(0); e.Handled = true; }
@@ -326,6 +327,7 @@ namespace SmoovPlay
             Click("HelpDocs", () => Proc.Open(ChiakiDocs));
             Click("HelpFeedback", () => SendFeedback(""));
             Click("RailUpdate", AskUpdate);
+            Click("RailCheck", CheckForUpdates);
             Click("ToastAction", ToastActionClicked);
             Click("HelpLicences", () =>
             {
@@ -521,6 +523,8 @@ namespace SmoovPlay
         /// <summary>GitHub has a newer release: a link under the version in the rail, and a note on the Help page.</summary>
         void ShowUpdate(string tag, string url)
         {
+            if (updating) return;
+            bool same = tag == updateTag;
             updateUrl = url;
             updateTag = tag;
             var link = B("RailUpdate");
@@ -529,9 +533,40 @@ namespace SmoovPlay
                 ? "Installs it: SmoovPlay closes, updates in a minute or two and opens again, with your settings."
                 : "Opens the release page. Download the new setup and run it: it updates this install and keeps your settings.";
             Show(link, true);
+            Show(B("RailCheck"), false);
             var help = T("HelpVersion");  // next to the version: the install path at the end gets cut off
-            help.Text = help.Text.Replace($"SmoovPlay {BuildInfo.Version}", $"SmoovPlay {BuildInfo.Version} ({tag} is out)");
+            if (!same) help.Text = $"SmoovPlay {BuildInfo.Version} ({tag} is out)  ·  Python {BuildInfo.PythonVersion}  ·  {paths.Install}";
             Snap("update");
+        }
+
+        /// <summary>The rail's "Check for updates": asks GitHub now, whatever the daily check last found.</summary>
+        void CheckForUpdates()
+        {
+            var link = B("RailCheck");
+            if ((link.Tag as string) == "busy") return;
+            link.Tag = "busy";
+            link.Content = "Checking...";
+            UpdateCheck.Now((tag, error) => OnUi(() =>
+            {
+                link.Tag = null;
+                if (error == null && tag != null && UpdateCheck.Compare(tag, BuildInfo.Version) > 0)
+                {
+                    link.Content = "Check for updates";
+                    ShowUpdate(tag, GitHub.Page(GitHub.Repo, tag));
+                    return;
+                }
+                link.Content = error != null ? "Couldn't check" : "Up to date";
+                link.ToolTip = error != null ? "GitHub didn't answer (" + Shorten(error, 120) + "). Click to try again." : V(BuildInfo.Version) + " is the newest.";
+                var t = new DispatcherTimer { Interval = TimeSpan.FromSeconds(error != null ? 8 : 4) };
+                t.Tick += (s, e) =>
+                {
+                    t.Stop();
+                    if ((link.Tag as string) == "busy") return;
+                    link.Content = "Check for updates";
+                    link.ToolTip = "Asks GitHub for a newer SmoovPlay now (it also checks by itself when it opens).";
+                };
+                t.Start();
+            }));
         }
 
         void StartLauncher()
@@ -542,6 +577,8 @@ namespace SmoovPlay
             T("HelpVersion").Text = $"SmoovPlay {BuildInfo.Version}  ·  Python {BuildInfo.PythonVersion}  ·  {paths.Install}";
             if (!paths.Dev) Task.Run(() => Updater.CleanUp());  // an update this one came from
             UpdateCheck.Start((tag, url) => Window.Dispatcher.BeginInvoke(new Action(() => ShowUpdate(tag, url))));
+            Show(B("RailCheck"), GitHub.Repo != null);
+            WatchSaving();  // before & after videos a session left being made, even before this launcher opened
             B("HelpRepair").IsEnabled = !paths.Dev;
             B("HelpUninstall").IsEnabled = !paths.Dev;
             T("CheckOverline").Text = "PC CHECK";
@@ -1334,6 +1371,7 @@ namespace SmoovPlay
         /// an app's window: which window (AppWindows).</summary>
         void BuildDevices()
         {
+            BuildWindowKeys();
             var host = E<WrapPanel>("PlayDevices");
             host.Children.Clear();
             bool capture = source.Kind == "capture", window = source.Kind == "window";
@@ -1348,7 +1386,13 @@ namespace SmoovPlay
             }
             if (CaptureDevices.Video.Count == 0)
             {
-                host.Children.Add(new TextBlock { Text = "No capture device found. Connect the card (USB 3, a blue port), then press Look again.", FontSize = 12.5, Foreground = R("Warn"), Margin = new Thickness(4, 8, 4, 0), TextWrapping = TextWrapping.Wrap, MaxWidth = 420 });
+                // Three different things: the look failed, Windows has sound devices only, or nothing at all
+                string why = CaptureDevices.Failed
+                    ? "Couldn't list capture devices: " + CaptureDevices.Error + ". Press Look again; if it keeps happening, please use Send feedback."
+                    : CaptureDevices.Audio.Count > 0
+                    ? $"No video capture device found (Windows lists {CaptureDevices.Audio.Count} sound {(CaptureDevices.Audio.Count == 1 ? "device" : "devices")} only). Connect the card (USB 3, a blue port), then press Look again."
+                    : "No capture device found. Connect the card (USB 3, a blue port), then press Look again.";
+                host.Children.Add(new TextBlock { Text = why, FontSize = 12.5, Foreground = R("Warn"), Margin = new Thickness(4, 8, 4, 0), TextWrapping = TextWrapping.Wrap, MaxWidth = 420 });
                 host.Children.Add(LookAgain());
                 return;
             }
@@ -1379,9 +1423,10 @@ namespace SmoovPlay
                 Task.Run(() => { AppWindows.Load(paths); OnUi(BuildDevices); });
                 return;
             }
+            string hint = AppWindows.MissedHint();
             if (AppWindows.List.Count == 0)
             {
-                host.Children.Add(new TextBlock { Text = "No app window found. Open the app you stream with (PS Remote Play, the Xbox app, Moonlight or a browser), then press Look again.", FontSize = 12.5, Foreground = R("Warn"), Margin = new Thickness(4, 8, 4, 0), TextWrapping = TextWrapping.Wrap, MaxWidth = 420 });
+                host.Children.Add(new TextBlock { Text = hint ?? "No app window found. Open the app you stream with (PS Remote Play, the Xbox app, Moonlight or a browser), then press Look again.", FontSize = 12.5, Foreground = R("Warn"), Margin = new Thickness(4, 8, 4, 0), TextWrapping = TextWrapping.Wrap, MaxWidth = 420 });
                 host.Children.Add(LookAgain());
                 return;
             }
@@ -1397,6 +1442,155 @@ namespace SmoovPlay
             app.MaxWidth = 420;
             host.Children.Add(Labelled("App", app));
             host.Children.Add(LookAgain());
+            if (hint != null)  // e.g. a browser is listed, but the Xbox app is minimised
+                host.Children.Add(new TextBlock { Text = hint, FontSize = 12.5, Foreground = R("Text2"), Margin = new Thickness(4, 8, 4, 0), TextWrapping = TextWrapping.Wrap, MaxWidth = 420 });
+        }
+
+        // ---- App window mode's keys (WindowKeys.cs) --------------------------------------------------------------
+        // The app keeps the keyboard, so SmoovPlay's keys come through Windows from anywhere: listed here, with what
+        // each gets on this PC (another program can have one), and changed by clicking one and pressing new keys.
+        bool keysEditing;
+        string keyListening;  // the action whose new keys are being pressed, or null
+        string keysProblem;   // why the last keys pressed can't be used
+
+        void BuildWindowKeys()
+        {
+            var host = E<StackPanel>("PlayKeys");
+            host.Children.Clear();
+            bool show = source != null && source.Kind == "window";
+            Show(host, show);
+            bool playing = session != null && session.Running;
+            if (!show || playing) { keysEditing = false; keyListening = null; keysProblem = null; }
+            if (!show) return;
+            var taken = new List<string>();
+            var got = playing ? WindowKeys.Playing(prefs) : WindowKeys.Resolve(prefs, taken);
+            if (playing) taken = WindowKeys.Live != null ? WindowKeys.LiveTaken : taken;
+            var picked = WindowKeys.Picked(prefs);
+
+            var card = new Border { Background = R("CardBg"), BorderBrush = R("Line2"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(10),
+                                    Padding = new Thickness(16, 12, 16, 12), Width = 460, HorizontalAlignment = HorizontalAlignment.Center };
+            AutomationProperties.SetAutomationId(card, "window-keys");
+            var sp = new StackPanel();
+            card.Child = sp;
+            var head = new DockPanel();
+            var change = new Button { Style = S("Bare"), Cursor = Cursors.Hand, VerticalAlignment = VerticalAlignment.Center,
+                                      Content = new TextBlock { Text = keysEditing ? "Done" : "Change keys", FontSize = 12.5, Foreground = R("Accent"), TextDecorations = TextDecorations.Underline } };
+            AutomationProperties.SetAutomationId(change, "window-keys-change");
+            change.Click += (o, e) =>
+            {
+                if (session != null && session.Running) { Toast("Stop playing first, then change the keys", true); return; }
+                keysEditing = !keysEditing;
+                keyListening = keysProblem = null;
+                BuildWindowKeys();
+            };
+            DockPanel.SetDock(change, Dock.Right);
+            head.Children.Add(change);
+            head.Children.Add(new TextBlock { Text = "SmoovPlay's keys while you play", FontSize = 13.5, FontWeight = FontWeights.SemiBold, Foreground = R("Text") });
+            sp.Children.Add(head);
+            sp.Children.Add(new TextBlock { Text = "The app keeps the keyboard, so M, F and Esc go to it. These work from anywhere:", FontSize = 12, Foreground = R("Text2"),
+                                            TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 3, 0, 8) });
+
+            var grid = new Grid();
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            int row = 0;
+            foreach (var a in WindowKeys.Actions)
+            {
+                grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                string k = got.ContainsKey(a.Id) ? got[a.Id] : null;
+                bool listening = keyListening == a.Id;
+                var chip = new Border  // a key cap, as on the Help page
+                {
+                    Height = 26, MinWidth = 150, CornerRadius = new CornerRadius(6), Background = Solid("#20252E"), BorderBrush = listening ? R("Accent") : Solid("#323A47"),
+                    BorderThickness = new Thickness(1, 1, 1, 3), Padding = new Thickness(10, 0, 10, 0), Margin = new Thickness(0, 3, 14, 3),
+                    Child = new TextBlock { Text = listening ? "Press the new keys…" : k ?? "None free", FontSize = 12, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center,
+                                            Foreground = listening ? R("Accent") : k == null ? R("Warn") : R("Text") },
+                };
+                UIElement first = chip;
+                if (keysEditing)
+                {
+                    string id = a.Id;
+                    var b = new Button { Style = S("Bare"), Cursor = Cursors.Hand, Content = chip, HorizontalAlignment = HorizontalAlignment.Left,
+                                         ToolTip = "Click, then press the keys you'd like (Esc cancels)" };
+                    AutomationProperties.SetAutomationId(b, "window-key-" + id);
+                    AutomationProperties.SetName(b, a.Label + " keys");
+                    b.Click += (o, e) => { keyListening = keyListening == id ? null : id; keysProblem = null; BuildWindowKeys(); };
+                    first = b;
+                }
+                Grid.SetRow(first, row);
+                grid.Children.Add(first);
+                var label = new TextBlock { Text = a.Label, FontSize = 12.5, Foreground = R("Text2"), VerticalAlignment = VerticalAlignment.Center };
+                Grid.SetRow(label, row);
+                Grid.SetColumn(label, 1);
+                grid.Children.Add(label);
+                if (keysEditing && picked.ContainsKey(a.Id))
+                {
+                    string id = a.Id;
+                    var reset = new Button { Style = S("Bare"), Cursor = Cursors.Hand, VerticalAlignment = VerticalAlignment.Center,
+                                             Content = new TextBlock { Text = "Default", FontSize = 12, Foreground = R("Accent"), TextDecorations = TextDecorations.Underline } };
+                    AutomationProperties.SetAutomationId(reset, "window-key-default-" + id);
+                    reset.Click += (o, e) => { WindowKeys.Pick(prefs, id, null); Prefs.Save(prefs); keyListening = keysProblem = null; BuildWindowKeys(); };
+                    Grid.SetRow(reset, row);
+                    Grid.SetColumn(reset, 2);
+                    grid.Children.Add(reset);
+                }
+                row++;
+            }
+            sp.Children.Add(grid);
+
+            // keys another program has: what SmoovPlay uses instead
+            foreach (var a in WindowKeys.Actions)
+            {
+                string k = got.ContainsKey(a.Id) ? got[a.Id] : null;
+                var tried = picked.ContainsKey(a.Id) ? new[] { picked[a.Id] } : a.Defaults;
+                var missed = taken.Where(t => tried.Contains(t)).Distinct().ToList();
+                if (missed.Count == 0) continue;
+                string what = string.Join(" and ", missed) + (missed.Count == 1 ? " is" : " are") + " used by another program on this PC, so ";
+                string text = k != null ? what + a.Label.ToLowerInvariant() + " uses " + k + "."
+                                        : what + a.Label.ToLowerInvariant() + " has no keys: press Change keys to pick others" + (a.Id == "quit" ? " (Stop here works too)." : ".");
+                sp.Children.Add(new TextBlock { Text = text, FontSize = 12, Foreground = R("Warn"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 0, 0) });
+            }
+            if (keysProblem != null)
+                sp.Children.Add(new TextBlock { Text = keysProblem, FontSize = 12, Foreground = R("Bad"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 0, 0) });
+            if (keysEditing)
+            {
+                var foot = new DockPanel { Margin = new Thickness(0, 8, 0, 0) };
+                if (picked.Count > 0)
+                {
+                    var all = new Button { Style = S("Bare"), Cursor = Cursors.Hand, VerticalAlignment = VerticalAlignment.Top,
+                                           Content = new TextBlock { Text = "Reset all", FontSize = 12, Foreground = R("Accent"), TextDecorations = TextDecorations.Underline } };
+                    AutomationProperties.SetAutomationId(all, "window-keys-reset");
+                    all.Click += (o, e) => { WindowKeys.ResetAll(prefs); Prefs.Save(prefs); keyListening = keysProblem = null; BuildWindowKeys(); };
+                    DockPanel.SetDock(all, Dock.Right);
+                    foot.Children.Add(all);
+                }
+                foot.Children.Add(new TextBlock { Text = "Click one, then press its new keys with Ctrl, Alt or Win. If nothing happens, another program has those keys.",
+                                                  FontSize = 12, Foreground = R("Muted"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 12, 0) });
+                sp.Children.Add(foot);
+            }
+            else
+                sp.Children.Add(new TextBlock { Text = "Stop here ends it too, and the Settings page changes things while you play.", FontSize = 12, Foreground = R("Muted"),
+                                                TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
+            host.Children.Add(card);
+        }
+
+        /// <summary>The keys pressed for the action being changed (Window.PreviewKeyDown): checked, then kept.</summary>
+        void OnKeysPressed(object sender, KeyEventArgs e)
+        {
+            if (keyListening == null || E("PagePlay").Visibility != Visibility.Visible) return;
+            var key = e.Key == Key.System ? e.SystemKey : e.Key;
+            var mods = Keyboard.Modifiers;
+            e.Handled = true;
+            if (key == Key.Escape && mods == ModifierKeys.None) { keyListening = keysProblem = null; BuildWindowKeys(); return; }
+            string name = WindowKeys.FromKey(key, mods);
+            if (name == null) return;  // only Ctrl, Alt, Shift or Win so far
+            string why = WindowKeys.Problem(name, keyListening, prefs);
+            if (why != null) { keysProblem = why; BuildWindowKeys(); return; }  // still listening
+            WindowKeys.Pick(prefs, keyListening, WindowKeys.Find(keyListening).Defaults[0] == name ? null : name);
+            Prefs.Save(prefs);
+            keyListening = keysProblem = null;
+            BuildWindowKeys();
         }
 
         UIElement Labelled(string label, UIElement child)
@@ -1493,13 +1687,32 @@ namespace SmoovPlay
                 s.CaptureVideo = CaptureDevices.ChosenVideo(prefs);
                 s.CaptureAudio = CaptureDevices.ChosenAudio(prefs);
             }
-            if (source.Kind == "window") s.WindowApp = AppWindows.Query(AppWindows.Chosen(prefs));
+            if (source.Kind == "window")
+            {
+                s.WindowApp = AppWindows.Query(AppWindows.Chosen(prefs));
+                s.WindowKeysArg = WindowKeys.Arg(prefs);
+                WindowKeys.Live = null;  // until this session says what it got
+                keysEditing = false;
+                keyListening = null;
+            }
             session = s;
             liveState = null;
             restartSent = minimisedForPlay = false;
             s.OnLine = line => playLog.Add(line);
             s.OnSettings = json => OnUi(() => OnSettingsState(s, json));
-            s.OnState = (st, d) => OnUi(() => { if (session == s) SetPlayState(st, d); });
+            s.OnWindowKeys = json => OnUi(() =>
+            {
+                if (session != s) return;
+                WindowKeys.FromSession(json);  // (before "[run] playing", whose text says them)
+                BuildWindowKeys();
+            });
+            s.OnState = (st, d) => OnUi(() =>
+            {
+                if (session != s) return;
+                SetPlayState(st, d);
+                if (st == PlayState.Stopped || st == PlayState.Ended || st == PlayState.Error) AfterSession();
+                if (source.Kind == "window") BuildWindowKeys();  // what was got while playing; then this PC's again
+            });
             s.OnNote = n => OnUi(() => { T("PlayNoteText").Text = n; Show(E("PlayNote"), true); });
             SetPlayState(PlayState.Starting, null);
             Task.Run(() =>
@@ -1538,7 +1751,13 @@ namespace SmoovPlay
                         title = "Testing";
                         sub = "Your 60 fps game is playing as if it were 30 fps. Play a few minutes, with some fast motion, then press Q in the video window for the results.";
                     }
-                    else if (source.Kind == "window") { title = "Playing"; sub = "The smooth picture is over the app's window. Clicks, keys and the controller go to the app, so change settings here (they apply straight away) and press Stop to end."; }
+                    else if (source.Kind == "window")
+                    {
+                        title = "Playing";
+                        string keys = WindowKeys.Sentence(WindowKeys.Playing(prefs));
+                        sub = "The smooth picture is over the app's window, and the app keeps the keyboard and the controller. "
+                              + (keys.Length > 0 ? keys + ", from anywhere (keys below)." : "Stop here ends it.") + " Settings here apply straight away.";
+                    }
                     else { title = "Playing"; sub = "The smooth video is in its own window. There, M opens the menu, F goes fullscreen and Esc stops. Settings here apply to it straight away."; }
                     break;
                 case PlayState.Ended: title = "The stream ended"; sub = "Press Play to connect again."; break;
@@ -1551,7 +1770,7 @@ namespace SmoovPlay
                     title = "Ready when you are";
                     sub = source.RemotePlay ? "Press Play. chiaki-ng opens: connect to your PS5 there, and the smooth video appears in its own window."
                         : source.Kind == "capture" ? "Press Play. The smooth video from your capture card appears in its own window."
-                        : source.Kind == "window" ? "Press Play. The smooth picture appears over the app's window, which keeps the controller and the keyboard."
+                        : source.Kind == "window" ? "Press Play. The smooth picture appears over the app's window, which keeps the keyboard and the controller. SmoovPlay's own keys are below."
                         : source.Kind == "tap" ? "Press Play, then start the app. Its smooth video appears in its own window."
                         : "Press Play to play the test video.";
                     break;
@@ -1717,7 +1936,7 @@ namespace SmoovPlay
             new[] { "window-app", "Open the app and start a game", "PS Remote Play, the Xbox app, Moonlight, or a browser for cloud gaming. If the app has a frame rate setting, pick 60 fps.", null },
             new[] { "window-screen", "Keep its window on screen", "Not minimised, and on the monitor plugged into the graphics card. SmoovPlay covers it with the smooth picture (or the whole monitor, in fullscreen) and leaves itself out of what it captures.", null },
             new[] { "window-sound", "Sound and controller", "The app keeps the controller, the keyboard and its own sound. Its sound comes a little ahead of the smooth picture.", null },
-            new[] { "window-play", "Pick the window, then press Play", "Choose the app's window under the source buttons on the Play page.", "play" },
+            new[] { "window-play", "Pick the window, then press Play", "Choose the app's window under the source buttons on the Play page. The app keeps the keyboard, so SmoovPlay's keys use Ctrl+Alt: Ctrl+Alt+M menu, Ctrl+Alt+F fullscreen, Ctrl+Alt+Esc quit. The Play page lists them all, and you can change them there.", "play" },
         };
 
         static readonly string[][] CaptureGuide =
@@ -1731,7 +1950,7 @@ namespace SmoovPlay
 
         static readonly string[][] TapGuide =
         {
-            new[] { "tap-app", "Use an app that sends its frames to SmoovPlay", "Some apps can hand their frames straight to SmoovPlay, saying which are repeats, so nothing is captured from the screen. For app developers, the format is docs/frame-tap.md in SmoovPlay's GitHub repo.", null },
+            new[] { "tap-app", "For app developers: an app that sends its frames to SmoovPlay", "An app built for it can hand its frames straight to SmoovPlay, saying which are repeats, so nothing is captured from the screen. The format is docs/frame-tap.md in SmoovPlay's GitHub repo. For the Xbox app, PS Remote Play, Moonlight or a browser, pick App window instead.", null },
             new[] { "tap-sound", "Sound and controller", "The app keeps the controller and plays its own sound.", null },
             new[] { "tap-play", "Press Play, then start the app", "Either can go first: SmoovPlay waits for the app's frames, then the smooth video opens in its own window.", "play" },
         };
@@ -1895,7 +2114,7 @@ namespace SmoovPlay
             if (session != null && session.Running) { Toast("Stop playing first", true); return; }
             Ask("\uE90F", "Accent", "Repair SmoovPlay",
                 "A quick repair checks every part and puts back anything missing (a few minutes). A full repair downloads everything again (about 5 GB).",
-                "Quick repair", "Full repair", "Cancel", r => { if (r == 1 || r == 2) StartInstall(false, r == 2); });
+                "Quick repair", "Full repair", "Cancel", r => { if (r == 1 || r == 2) UnlessSaving("Repairing", () => StartInstall(false, r == 2)); });
         }
 
         /// <summary>The "Update available" link: install it from here (Updater), or open the release page for a copy
@@ -1911,7 +2130,7 @@ namespace SmoovPlay
                 "Your settings, looks and clips stay." + (chiaki ? " chiaki-ng closes too, since it's updated with it." : ""),
                 "Update now", "What's new", "Later", r =>
                 {
-                    if (r == 1) RunUpdate();
+                    if (r == 1) UnlessSaving("Updating", RunUpdate);
                     else if (r == 2) Proc.Open(updateUrl);
                 });
         }
@@ -1984,13 +2203,99 @@ namespace SmoovPlay
                 "Uninstall", null, "Cancel", r =>
                 {
                     if (r != 1) return;
-                    try
+                    UnlessSaving("Uninstalling", () =>
                     {
-                        Process.Start(new ProcessStartInfo(Path.Combine(paths.Install, "SmoovPlay.exe"), "--uninstall --yes") { WorkingDirectory = Path.GetTempPath() });
-                        allowClose = true;
-                        Window.Close();
-                    }
-                    catch (Exception e) { Toast("Couldn't start the uninstaller: " + e.Message, true); }
+                        try
+                        {
+                            Process.Start(new ProcessStartInfo(Path.Combine(paths.Install, "SmoovPlay.exe"), "--uninstall --yes") { WorkingDirectory = Path.GetTempPath() });
+                            allowClose = true;
+                            Window.Close();
+                        }
+                        catch (Exception e) { Toast("Couldn't start the uninstaller: " + e.Message, true); }
+                    });
+                });
+        }
+
+        // ------------------------------------------------------------------------------------------- saving
+        // Before & after videos carry on in their own process once play stops (Saving). Closing the launcher leaves
+        // them be; updating, repairing and uninstalling would stop them, so those ask first.
+        DispatcherTimer savingTimer;
+        readonly Dictionary<int, string> savingKnown = new Dictionary<int, string>();  // being made: process id -> video
+        bool closeWhenStopped;
+
+        /// <summary>A session has ended: close, if that was asked for while it was stopping; otherwise say how any
+        /// before & after videos it left being made get on.</summary>
+        void AfterSession()
+        {
+            if (closeWhenStopped)
+            {
+                allowClose = true;
+                Window.Close();
+                return;
+            }
+            WatchSaving();
+        }
+
+        void WatchSaving()
+        {
+            if (savingTimer == null)
+            {
+                savingTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+                savingTimer.Tick += (s, e) => CheckSaving();
+            }
+            savingTimer.Start();
+            CheckSaving();
+        }
+
+        void CheckSaving()
+        {
+            if (session != null && session.Running) { savingTimer.Stop(); return; }  // a session reports its own
+            var all = Saving.Read();
+            foreach (var v in all.Where(x => !x.Running))
+            {
+                if (v.Failed != null) Toast("Couldn't make the before & after video: " + Shorten(v.Failed, 140), true);
+                else if (!File.Exists(v.Out)) Toast("The before & after video was stopped before it was finished", true);
+                savingKnown.Remove(v.Pid);
+                Saving.Forget(v);
+            }
+            // Finished: it tidies its file away itself.
+            var done = savingKnown.Where(k => !all.Any(v => v.Pid == k.Key)).ToList();
+            foreach (var k in done) savingKnown.Remove(k.Key);
+            var saved = done.Select(k => k.Value).Where(File.Exists).ToList();
+            if (saved.Count > 0)
+            {
+                string last = saved[saved.Count - 1];
+                Toast("Saved " + (saved.Count == 1 ? "the before & after video: " + Path.GetFileName(last) : saved.Count + " before & after videos"),
+                    false, "Show", () => ShowFile(last));
+            }
+            var started = all.Where(v => v.Running && !savingKnown.ContainsKey(v.Pid)).ToList();
+            foreach (var v in started) savingKnown[v.Pid] = v.Out;
+            if (started.Count > 0)
+                Toast((started.Count == 1 ? "A before & after video is" : started.Count + " before & after videos are")
+                    + " being made, usually for a minute or two. It carries on if you close SmoovPlay.", false);
+            if (savingKnown.Count == 0) savingTimer.Stop();
+        }
+
+        static void ShowFile(string path)
+        {
+            try { Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + path + "\"") { UseShellExecute = false }); } catch (Exception) { }
+        }
+
+        /// <summary>Runs go, after asking first if a before & after video is still being made, which `doing`
+        /// ("Updating") would stop.</summary>
+        void UnlessSaving(string doing, Action go)
+        {
+            var making = Saving.Read().Where(v => v.Running).ToList();
+            if (making.Count == 0) { go(); return; }
+            Ask("", "Warn", making.Count == 1 ? "A video is still being saved" : "Videos are still being saved",
+                (making.Count == 1 ? "A before & after video is" : making.Count + " before & after videos are")
+                + " still being made, usually for a minute or two more. " + doing + " now stops it, and it won't be saved.",
+                doing + " anyway", null, "Wait", r =>
+                {
+                    if (r != 1) return;
+                    Saving.Stop(making);
+                    foreach (var v in making) savingKnown.Remove(v.Pid);
+                    go();
                 });
         }
 
@@ -2141,9 +2446,12 @@ namespace SmoovPlay
                 Ask("\uE768", "Accent", "SmoovPlay is running", "Stop it and close? chiaki-ng stays open.", "Stop and close", null, "Keep playing", r =>
                 {
                     if (r != 1) return;
-                    session.Stop();
-                    allowClose = true;
-                    Window.Close();
+                    // Closes once the session has gone: it finishes a clip being saved first (a second or two).
+                    closeWhenStopped = true;
+                    var s = session;
+                    s.Stop();
+                    if (!s.Running) { allowClose = true; Window.Close(); }
+                    else Window.Hide();
                 });
             }
         }

@@ -18,7 +18,7 @@ def _window(monkeypatch, fg, idle_ms):
     w.glfw, w.win = SimpleNamespace(get_win32_window=lambda win: OURS), object()
     state = SimpleNamespace(fg=fg, idle_ms=idle_ms, brought=0)
 
-    def bring(hwnd):
+    def bring(hwnd, nudge=False):
         state.brought += 1
         state.fg = (OURS, "python.exe")
         return True
@@ -85,3 +85,34 @@ def test_chiaki_minimised_again_when_the_video_window_is_back_in_front(monkeypat
     assert calls == [1]
     _poll(w)
     assert calls == [1]  # once per return, not four times a second
+
+
+def test_a_window_that_opened_without_the_keys_takes_them_once_even_after_mouse_moves(monkeypatch, capsys):
+    w, s = _window(monkeypatch, (200, "chiaki.exe"), idle_ms=50)  # the mouse moved just now
+    w._had_front = False  # Windows let chiaki-ng keep the keys when the video window opened
+    _poll(w)
+    assert s.brought == 1 and "opened behind chiaki.exe: took the keys" in capsys.readouterr().out
+    w._front_at = time.perf_counter() - 1.0
+    s.fg = (200, "chiaki.exe")  # a second later the player went back to chiaki-ng on purpose: theirs to choose
+    _poll(w)
+    assert s.brought == 1
+
+
+def test_fullscreen_is_a_borderless_window_so_alt_tab_works():
+    calls = []
+
+    class G:
+        DECORATED, FALSE, TRUE = 1, 0, 1
+
+        def __getattr__(self, name):
+            out = {"get_window_pos": (80, 80), "get_window_size": (1600, 900), "get_monitor_pos": (0, 0)}.get(
+                name, SimpleNamespace(size=SimpleNamespace(width=2560, height=1440)))
+            return lambda *a: calls.append(name) or out
+
+    w = io.GLWindowSink.__new__(io.GLWindowSink)
+    w.glfw, w.win, w.overlay_of, w.dx, w.fs_style, w._borderless = G(), object(), None, None, "none", False
+    w.windowed_pos, w.settings = None, SimpleNamespace(vsync=True)
+    w._set_fullscreen(True)
+    assert w._borderless and "set_window_monitor" not in calls  # GLFW's fullscreen stays on top of everything
+    w._set_fullscreen(False)
+    assert not w._borderless

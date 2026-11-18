@@ -178,6 +178,54 @@ class DuplicateDetector:
         return FrameDiff(is_new, stats[0], stats[1], CutFeatures(*stats[2:]))
 
 
+class RhythmLock:
+    """Game frame rate set to 30 fps: a 30 fps game at 60 Hz alternates new frame, repeat, so every other tick is new,
+    whatever the checks make of a still scene, a dark one or a busy stream. The checks only choose which of the two
+    ticks it is (the phase), by a vote over the last WINDOW ticks; it moves when the other phase wins by MARGIN (a
+    hitch shifts the game's frames by a tick). A repeat is a copy of the frame before it, so the wrong phase only
+    shows each frame a tick (17 ms) later: the vote can take its time and ignore misreads.
+
+    The evidence for a tick: with compressed sizes (PS5 Remote Play), whether it's bigger than the tick before (a new
+    frame costs the encoder more than the repeat after it, however small both are, and that needs no line between
+    "small" and "big"); else the checks' new-or-repeat call. Keyframes and ticks with no call say nothing.
+
+    seq: the stream's own frame number (Remote Play). Frames are counted by it rather than as they arrive, so a frame
+    lost on the way doesn't shift the count (in a real Gotham Knights session, 23 lost frames moved the rhythm 11
+    times when counted as they arrived)."""
+
+    WINDOW, MARGIN, MIN = 32, 10, 8
+
+    def __init__(self) -> None:
+        self._votes: deque = deque(maxlen=self.WINDOW)  # (frame number, looks new)
+        self._n = 0
+        self._last: tuple[int, int] | None = None  # the previous frame's (number, size)
+        self.phase: int | None = None  # new frames fall on ticks whose number % 2 == phase
+        self.moves = 0  # times the phase moved after it was first found
+
+    def update(self, call: bool | None, size: int | None = None, keyframe: bool = False,
+               seq: int | None = None) -> bool:
+        n = seq if seq is not None else self._n
+        self._n = n + 1
+        if size is not None:  # against the frame just before it (not one from before a lost frame)
+            prev = self._last
+            looks = None if keyframe or prev is None or prev[0] != n - 1 else size > prev[1]
+            self._last = None if keyframe else (n, size)
+        else:
+            looks = call
+        if looks is not None:
+            self._votes.append((n, looks))
+        if len(self._votes) >= self.MIN:
+            agree = [sum(v == (i % 2 == p) for i, v in self._votes) for p in (0, 1)]
+            best = 0 if agree[0] >= agree[1] else 1
+            if self.phase is None:
+                self.phase = best
+            elif best != self.phase and agree[best] - agree[self.phase] >= self.MARGIN:
+                self.phase, self.moves = best, self.moves + 1
+        if self.phase is None:  # the first few ticks: as the checks say
+            return True if call is None else bool(call)
+        return n % 2 == self.phase
+
+
 class CutDetector:
     """Flags scene cuts among *new* frames, where interpolating would ghost two shots together.
 

@@ -1,7 +1,9 @@
 """Instant replay (framegen/replay.py): the tracks it keeps, what it saves, the before & after video, the sound's
 timing, and the pipeline's side. x264 on the CPU and small frames, so it runs anywhere; one check of the graphics
 card's YUV against the CPU's when there's CUDA."""
+import os
 import re
+import sys
 import time
 
 import av
@@ -131,16 +133,60 @@ def test_before_and_after_split_and_side_by_side(rec, tmp_path):
 
 def test_labels_name_the_frame_rates(rec, monkeypatch):
     seen = []
-    real_run = replay.subprocess.run
+    real_popen = replay.subprocess.Popen
 
-    def run(cmd, **kw):
+    def popen(cmd, **kw):
         seen.append(cmd)
-        return real_run(cmd, **kw)
-    monkeypatch.setattr(replay.subprocess, "run", run)
+        return real_popen(cmd, **kw)
+    monkeypatch.setattr(replay.subprocess, "Popen", popen)
     _feed(rec, 3)
     rec.save("compare", wait=True)
     labels = seen[0][seen[0].index("--labels") + 1:][:2]
     assert labels == ["Original 30 fps", "SmoovPlay 90 fps"]
+
+
+def test_stopping_waits_for_the_clip_but_not_the_before_and_after(rec, tmp_path, monkeypatch, capsys):
+    """Esc: the clip is finished first, but a before & after video carries on in its own process, so the video
+    window never waits on it (it once looked frozen for half a minute, and Windows offered to end it)."""
+    real_popen, procs = replay.subprocess.Popen, []
+
+    def slow(cmd, **kw):  # stands in for making the before & after video
+        procs.append(real_popen([sys.executable, "-c", "import time; time.sleep(4)"], **kw))
+        return procs[-1]
+    monkeypatch.setattr(replay.subprocess, "Popen", slow)
+    _feed(rec, 3)
+    rec.save("both")
+    t0 = time.perf_counter()
+    while not procs and time.perf_counter() - t0 < 10:
+        time.sleep(0.02)
+    t1 = time.perf_counter()
+    rec.close(wait_saves=30)
+    took = time.perf_counter() - t1
+    assert procs and procs[0].poll() is None and took < 2.5
+    assert len(list(tmp_path.glob("SmoovPlay *.mp4"))) == 1  # the clip itself is there
+    assert "still being made: they carry on in the background" in capsys.readouterr().out
+    procs[0].wait(10)
+
+
+def test_the_before_and_after_process_leaves_word_for_the_launcher(tmp_path):
+    mark = tmp_path / "saving"
+    out = tmp_path / "x before and after.mp4"
+    with pytest.raises(Exception):
+        replay.main(["compose", "--after", str(tmp_path / "none.ts"), "--before", str(tmp_path / "none.ts"),
+                     "--out", str(out), "--mark", str(mark)])
+    files = list(mark.glob("*.txt"))
+    assert len(files) == 1 and files[0].stem == str(os.getpid())
+    lines = files[0].read_text(encoding="utf-8").splitlines()
+    assert lines[0] == str(out) and lines[1].startswith("failed: ")
+    assert not out.exists() and not (tmp_path / (out.name + ".part")).exists()
+
+
+def test_a_finished_before_and_after_tidies_its_word_away(rec, tmp_path):
+    rec.mark_dir = tmp_path / "saving"
+    _feed(rec, 3)
+    paths = rec.save("compare", wait=True)
+    assert len(paths) == 1 and paths[0].exists()
+    assert not list(rec.mark_dir.glob("*"))
 
 
 def test_off_says_so_and_takes_nothing(tmp_path):

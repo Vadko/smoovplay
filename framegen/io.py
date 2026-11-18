@@ -292,6 +292,8 @@ def _host(frame) -> np.ndarray:
 # that starts fullscreen uses the standard presentation, and a Low delay window stays a window until the next Play.
 # Under test (scripts/dxgi_smoke.py): "monitor", GLFW's fullscreen (an always-on-top window exactly over the monitor);
 # "borderless", a plain borderless window over it, as games' borderless mode. See framegen/dxgi_present.py.
+# The standard presentation's fullscreen is that borderless window too, unless this is "monitor": GLFW's stays on top
+# of everything, so Alt+Tab to another program left the video over it.
 FULLSCREEN_STYLE = os.environ.get("FRAMEGEN_FULLSCREEN_STYLE", "none")
 
 
@@ -454,7 +456,8 @@ class GLWindowSink:
     KEYS_HINT = "M: menu    F: fullscreen    Esc: quit"
 
     def __init__(self, w: int, h: int, settings=None, restart_reasons=None, choices: dict | None = None,
-                 unavailable: dict | None = None, overlay_of=None, hdr: bool = False, hdr_peak: float = 1000.0) -> None:
+                 unavailable: dict | None = None, overlay_of=None, hdr: bool = False, hdr_peak: float = 1000.0,
+                 window_keys: dict | None = None) -> None:
         import glfw
         from OpenGL import GL
 
@@ -500,7 +503,7 @@ class GLWindowSink:
         glfw.set_window_attrib(self.win, glfw.AUTO_ICONIFY, glfw.FALSE)
         self._set_icon(glfw)
         self.overlay, self.cmd, self.windowed_pos, self.remote = st.overlay, None, None, None
-        self._borderless = False  # fullscreen as a borderless window (FRAMEGEN_FULLSCREEN_STYLE, under test)
+        self._borderless = False  # fullscreen as a borderless window (_set_borderless)
         glfw.set_key_callback(self.win, self._on_key)
         glfw.set_cursor_pos_callback(self.win, self._on_mouse)
         self._hint_next = 0.0  # moving the mouse shows the keys again, at most this often
@@ -509,6 +512,8 @@ class GLWindowSink:
         # along a program can take the keys without the player doing anything (they're taken back).
         self.settle_hook = None
         self._was_front = True
+        self._had_front = False  # the video window has had the keys since it opened (settle)
+        self._take_tries = 0  # settle's tries at taking the keys the window opened without
         t = time.perf_counter()
         self._settle_until, self._settle_next, self._any_until = t + 10.0, 0.0, t + 15.0
         self._front_at: float | bool = t  # when the video window last had the keys (from when it opened); False: off
@@ -606,9 +611,10 @@ class GLWindowSink:
         self._waited = -1  # wait(): the whole second the "no picture" note last said (-1: no wait going on)
         self._unwatch = st.watch(self._apply)
         self._overlay_at, self._overlay_check = None, 0.0
+        self.hotkeys, self._cursor_at = None, None
         if overlay_of is not None:
             self._make_overlay()
-            self._toast_text = "Settings: on SmoovPlay's Settings page (keys go to the app)"
+            self._start_hotkeys(window_keys)
         else:
             if st.fullscreen:
                 self._set_fullscreen(True)
@@ -657,7 +663,19 @@ class GLWindowSink:
             if back and not early:
                 self._run_settle_hook()
             if hwnd == ours:
-                self._front_at = now
+                self._front_at, self._had_front = now, True
+                return
+            if not getattr(self, "_had_front", True) and now < self._any_until and exe in self.TAKERS:
+                # Opened without the keys (Windows let the program in front keep them): take them, even if the mouse
+                # moved meanwhile (moving it isn't choosing another window). A few tries, then the usual rule.
+                self._take_tries = getattr(self, "_take_tries", 0) + 1
+                if bring_to_front(ours, nudge=True):
+                    self._front_at, self._had_front = now, True
+                    print(f"[display] the video window opened behind {exe or 'no window'}: took the keys")
+                elif self._take_tries >= 4:
+                    self._had_front = True
+                    print(f"[display] the video window opened behind {exe or 'no window'} and couldn't take the keys "
+                          "(click it once)")
                 return
             idle = ms_since_input()
             if idle is None or idle / 1000.0 < now - self._front_at:
@@ -674,6 +692,18 @@ class GLWindowSink:
             print(f"[display] couldn't check which window is in front ({str(e)[:160]})")
             self._front_at = False  # (stops checking)
 
+    def take_keys(self) -> None:
+        """Right after the window opens, while the program the player was in (chiaki-ng) is still in front: take the
+        keys from it before it's minimised (run.py), which would leave no window in front to take them from."""
+        if sys.platform != "win32" or self.overlay_of is not None:
+            return
+        from .winutil import bring_to_front
+        try:
+            if bring_to_front(self.glfw.get_win32_window(self.win), nudge=True):
+                self._front_at, self._had_front = time.perf_counter(), True
+        except Exception as e:  # noqa: BLE001 - settle() tries again
+            print(f"[display] couldn't take the keys ({str(e)[:160]})")
+
     def _run_settle_hook(self) -> None:
         if self.settle_hook is None:
             return
@@ -688,7 +718,7 @@ class GLWindowSink:
         now = time.perf_counter()
         if now >= self._hint_next and not self.menu.open and now >= self._toast_until:
             self._hint_next = now + 20.0
-            self.toast(self.KEYS_HINT, 3.0)
+            self.toast(self.KEYS_HINT, 3.0 if self.hotkeys is None else 6.0)
 
     def _name(self, mode: str) -> str:
         return f"RTX VSR q{self.vsr.quality}" if mode == "vsr" else self.NAMES[mode]
@@ -820,6 +850,54 @@ class GLWindowSink:
         u32.SetWindowLongW(hwnd, -20, u32.GetWindowLongW(hwnd, -20) | 0x08000000)  # GWL_EXSTYLE |= WS_EX_NOACTIVATE
         self._follow()
 
+    def _start_hotkeys(self, picked: dict | None) -> None:
+        """Window capture: the overlay never has the keys, so its own come through system-wide shortcuts
+        (framegen/hotkeys.py), registered for this thread, the one that draws (_events takes their messages). Says
+        which it got, over the picture and to the launcher ("[window-keys] ...")."""
+        from .hotkeys import Hotkeys, describe
+        try:
+            self.hotkeys = Hotkeys(picked)
+        except Exception as e:  # noqa: BLE001 - no shortcuts: the launcher's Stop and Settings page still work
+            print(f"[display] no shortcuts ({str(e)[:120]}): Stop and Settings on SmoovPlay's Play page")
+        keys = describe(self.hotkeys.got) if self.hotkeys is not None else ""
+        if self.hotkeys is not None:
+            print(self.hotkeys.report(), flush=True)
+            for name in self.hotkeys.taken:
+                print(f"[display] {name} is taken by another program")
+        self.KEYS_HINT = ("SmoovPlay's keys here (other keys go to the app):\n" + keys if keys
+                          else "Keys go to the app: use Stop and Settings on SmoovPlay's Play page")
+        self.toast(self.KEYS_HINT, 12.0)
+
+    # the video window's key each menu key stands for
+    _HOTKEY_GLFW = {"Up": "UP", "Down": "DOWN", "Left": "LEFT", "Right": "RIGHT", "Enter": "ENTER", "Esc": "ESCAPE",
+                    "Backspace": "BACKSPACE"}
+
+    def _events(self) -> None:
+        """glfw.poll_events, after the shortcuts' messages (window capture): they come to the thread, not a window,
+        and GLFW would drop them. Each works as its key does in the video window's own (M, F, Q...); the menu's keys
+        are taken only while it's open."""
+        if self.hotkeys is not None:
+            from .hotkeys import ACTIONS
+            self.hotkeys.set_nav(self.menu.open)
+            for what in self.hotkeys.poll():
+                key = self._HOTKEY_GLFW[what[4:]] if what.startswith("nav:") else ACTIONS[what][1]
+                self._on_key(self.win, getattr(self.glfw, "KEY_" + key), 0, self.glfw.PRESS, 0)
+                self.hotkeys.set_nav(self.menu.open)
+        self.glfw.poll_events()
+
+    def _hint_on_hover(self, r) -> None:
+        """Window capture: the overlay gets no mouse events (clicks go to the app), so the pointer is looked at here
+        (from _follow): moving it over the picture shows the keys again, at most every 20 s."""
+        import ctypes
+        from ctypes import wintypes as wt
+        pt = wt.POINT()
+        if not ctypes.windll.user32.GetCursorPos(ctypes.byref(pt)):
+            return
+        at, moved = (pt.x, pt.y), self._cursor_at is not None and (pt.x, pt.y) != self._cursor_at
+        self._cursor_at = at
+        if moved and r.x <= pt.x < r.x + r.w and r.y <= pt.y < r.y + r.h:
+            self._on_mouse(self.win, 0, 0)
+
     def _follow(self) -> None:
         """Window capture: keeps the overlay over the app's picture (fullscreen: its monitor), four times a second."""
         now = time.perf_counter()
@@ -831,6 +909,8 @@ class GLWindowSink:
             return
         client, monitor = where
         r = monitor if self.settings.fullscreen else client
+        if self.hotkeys is not None:
+            self._hint_on_hover(r)
         at = (r.x, r.y, r.w, r.h)
         if at != self._overlay_at:
             self._overlay_at = at
@@ -843,7 +923,7 @@ class GLWindowSink:
             self._overlay_at, self._overlay_check = None, 0.0
             self._follow()
             return
-        if self.dx is not None and self.fs_style == "borderless":
+        if self.fs_style == "borderless" or (self.dx is None and self.fs_style != "monitor"):
             self._set_borderless(on)
             return
         if bool(glfw.get_window_monitor(win)) == on:
@@ -861,8 +941,10 @@ class GLWindowSink:
         glfw.swap_interval(1 if self.settings.vsync else 0)
 
     def _set_borderless(self, on: bool) -> None:
-        """Fullscreen as a borderless window over the monitor (FRAMEGEN_FULLSCREEN_STYLE=borderless, DXGI only, under
-        test): no GLFW fullscreen monitor, so no always-on-top window and no video mode request."""
+        """Fullscreen as a borderless window over the monitor, as games' borderless mode (the standard presentation's
+        fullscreen, and HDR output's): no GLFW fullscreen monitor, so no always-on-top window (Alt+Tab to another
+        program puts that one in front) and no video mode request. Windows tucks the taskbar under it while it's in
+        front."""
         glfw, win = self.glfw, self.win
         if self._borderless == on:
             return
@@ -944,6 +1026,8 @@ class GLWindowSink:
         if self.dx is not None:
             self.dx.resize(fw, fh)  # cheap when the size hasn't changed
         s = min(fw / self.w, fh / self.h)  # letterbox, keep aspect
+        if self.overlay_of is not None:  # window capture: the frame is the app's window squeezed to the stream's
+            return fw, fh, s, fw, fh, 0, 0  # size, so it's stretched back over it to fill the overlay exactly
         dw, dh = int(self.w * s), int(self.h * s)
         return fw, fh, s, dw, dh, (fw - dw) // 2, (fh - dh) // 2
 
@@ -1002,9 +1086,9 @@ class GLWindowSink:
             self.toast(f"{text}{dots:<3}", 1.0)
             self._draw_ui(x0, y0, dw, dh)
             self._present()
-            glfw.poll_events()
-            if self.remote is not None:
-                self.remote.poll()  # live settings still apply; a restart is already under way
+            self._events()
+            if self.remote is not None and self.remote.poll() == "quit":  # live settings still apply; a
+                self.cmd = "quit"  # restart is already under way, but a Stop is kept for when it's done
             worker.join(0.05)
         self._toast_until = 0.0
         ok, value = out[0]
@@ -1031,9 +1115,11 @@ class GLWindowSink:
             self._draw_ui(x0, y0, dw, dh)
             self._present()
         self.settle()
-        glfw.poll_events()
-        if self.remote is not None and self.remote.poll() == "restart" and self.cmd is None:
-            self.cmd = "restart"
+        self._events()
+        if self.remote is not None:
+            r = self.remote.poll()  # the launcher's Stop sends quit
+            if r == "quit" or (r == "restart" and self.cmd is None):
+                self.cmd = r
         if glfw.window_should_close(self.win):
             return "quit"
         if self.cmd in ("quit", "restart"):
@@ -1099,9 +1185,11 @@ class GLWindowSink:
         self._draw_ui(x0, y0, dw, dh)
         self._present()
         self.settle()
-        glfw.poll_events()
-        if self.remote is not None and self.remote.poll() == "restart" and self.cmd is None:
-            self.cmd = "restart"
+        self._events()
+        if self.remote is not None:
+            r = self.remote.poll()  # the launcher's Stop sends quit
+            if r == "quit" or (r == "restart" and self.cmd is None):
+                self.cmd = r
         if glfw.window_should_close(self.win):
             return "quit"
         cmd, self.cmd = self.cmd, None
@@ -1233,7 +1321,19 @@ class GLWindowSink:
         reader.read(rgba)
         return rgba[..., [2, 1, 0]]  # BGR, like the frame
 
+    def hide(self) -> None:
+        """Take the window off the screen now, before what's left of stopping (clips finishing saving): close()
+        follows."""
+        try:
+            self.glfw.hide_window(self.win)
+            self._events()
+        except Exception:  # noqa: BLE001 - closing anyway
+            pass
+
     def close(self) -> None:
+        if self.hotkeys is not None:
+            self.hotkeys.close()
+            self.hotkeys = None
         self.GL.glFinish()
         self.timer._collect()
         if self.timer.ms:

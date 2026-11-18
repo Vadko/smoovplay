@@ -98,12 +98,16 @@ def ms_since_input() -> int | None:
     return (ctypes.windll.kernel32.GetTickCount() - lii.dwTime) & 0xFFFFFFFF
 
 
-def bring_to_front(hwnd: int) -> bool:
+def bring_to_front(hwnd: int, nudge: bool = False) -> bool:
     """Puts our window in front with the keyboard focus, so its keys work without a click first. Windows only lets
     the program that's in front hand the focus on (SetForegroundWindow from anyone else just flashes the taskbar
     button), and when the video window opens, the program in front is chiaki-ng, where the player just pressed
     connect. So this briefly shares that program's input queue (AttachThreadInput), which lets the focus move.
-    Call it from the window's own thread. Returns whether our window ended up in front."""
+    Call it from the window's own thread. Returns whether our window ended up in front.
+
+    nudge: if that wasn't enough (no window in front to share with, or Windows refused), ask again with Alt held
+    down. Windows lets a program that's just had a key press take the front; the press goes to the program in front,
+    the release to ours, and Alt alone does nothing in either."""
     if sys.platform != "win32" or not hwnd:
         return False
     from ctypes import wintypes as wt
@@ -127,6 +131,14 @@ def bring_to_front(hwnd: int) -> bool:
     finally:
         if joined:
             u32.AttachThreadInput(me, other, False)
+    if nudge and u32.GetForegroundWindow() != hwnd:
+        VK_MENU, KEYUP = 0x12, 0x0002
+        u32.keybd_event(VK_MENU, 0, 0, 0)
+        try:
+            u32.SetForegroundWindow(hwnd)
+            u32.SetFocus(hwnd)
+        finally:
+            u32.keybd_event(VK_MENU, 0, KEYUP, 0)
     return u32.GetForegroundWindow() == hwnd
 
 

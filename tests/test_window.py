@@ -64,6 +64,67 @@ def test_known_apps_have_names():
     assert AppWindow(1, "x", "someplayer.exe", 640, 360).app == "someplayer"
 
 
+def test_the_xbox_app_is_found_by_either_of_its_programs():
+    # Its Start menu entry runs XboxPcAppCE.exe; the older Store version in the same package is XboxPcApp.exe
+    desktop = AppWindow(21, "Xbox", "xboxpcappce.exe", 1920, 1080)
+    assert desktop.app == "Xbox app"
+    assert pick("xbox", [desktop]) is desktop
+    assert pick("exe:XboxPcApp.exe", [desktop]) is desktop  # what an older pick was saved as
+    assert pick("exe:xboxpcappce", WINDOWS).hwnd == 12
+
+
+class _Shell:
+    """Stand-ins for the calls find_windows makes: a desktop of top-level windows, some of them Store app frames
+    (ApplicationFrameHost.exe) with the app's own window inside."""
+    TOP = {  # hwnd: (program, title, children as (hwnd, class, program))
+        100: ("applicationframehost.exe", "Xbox", [(101, "Windows.UI.Core.CoreWindow", "xboxpcapp.exe")]),
+        200: ("applicationframehost.exe", "Settings", [(201, "Windows.UI.Core.CoreWindow", "systemsettings.exe")]),
+        300: ("applicationframehost.exe", "Suspended app", []),  # Windows took the app's window out of the frame
+        400: ("xboxpcappce.exe", "Xbox", []),
+        500: ("explorer.exe", "Documents", []),
+        600: ("applicationframehost.exe", "Store game",
+              [(601, "ApplicationFrameTitleBarWindow", "applicationframehost.exe"), (602, "SomeOtherClass", "storegame.exe")]),
+    }
+
+    def __init__(self, monkeypatch):
+        exe = {h: e for h, (e, _, _) in self.TOP.items()}
+        exe |= {c: e for _, _, kids in self.TOP.values() for c, _, e in kids}
+        title = {h: t for h, (_, t, _) in self.TOP.items()}
+
+        def find_child(parent, after, cls, name):
+            kids = self.TOP.get(parent, (None, None, []))[2]
+            if cls is not None:
+                return next((c for c, k, _ in kids if k == cls), None)
+            hs = [c for c, _, _ in kids]
+            i = hs.index(after) + 1 if after in hs else 0
+            return hs[i] if i < len(hs) else None
+
+        def set_pid(h, ref):
+            ref._obj.value = h  # a process per window is enough here
+        u32 = type("U32", (), {
+            "EnumWindows": staticmethod(lambda each, _: [each(h, 0) for h in self.TOP]),
+            "IsWindowVisible": staticmethod(lambda h: True), "GetWindow": staticmethod(lambda h, rel: None),
+            "GetWindowLongW": staticmethod(lambda h, i: 0), "IsIconic": staticmethod(lambda h: False),
+            "GetWindowThreadProcessId": staticmethod(set_pid),
+            "GetWindowTextLengthW": staticmethod(lambda h: len(title[h])),
+            "GetWindowTextW": staticmethod(lambda h, buf, n: setattr(buf, "value", title[h])),
+            "FindWindowExW": staticmethod(find_child)})()
+        dwm = type("Dwm", (), {"DwmGetWindowAttribute": staticmethod(lambda *a: 0)})()  # nothing cloaked
+        monkeypatch.setattr(window, "_api", lambda: (u32, None, dwm))
+        monkeypatch.setattr(window, "_exe_of", lambda h, cache: exe.get(int(h), ""))
+        monkeypatch.setattr(window, "client_rect", lambda h: Rect(0, 0, 1280, 720))
+
+
+def test_a_store_apps_frame_is_listed_as_the_app_inside_it(monkeypatch):
+    _Shell(monkeypatch)
+    found = {w.hwnd: w for w in window.find_windows()}
+    assert set(found) == {100, 400, 600}  # not Settings, a frame with no app in it, or Explorer
+    assert found[100].exe == "xboxpcapp.exe" and found[100].app == "Xbox app"  # the frame's handle, the app's name
+    assert found[400].app == "Xbox app" and found[600].exe == "storegame.exe"
+    assert [w.hwnd for w in window.find_windows()][-1] == 600  # known apps first
+    assert pick("xbox").hwnd in (100, 400)
+
+
 # ----------------------------------------------------------------------------- the source
 class _Frame:
     def __init__(self, i, w, h):
@@ -130,6 +191,26 @@ def test_source_follows_a_moving_window_and_ends_when_it_closes(monkeypatch):
     assert [t.frame.shape for t in ticks[:1]] == [(360, 640, 3)]
     assert [t.index for t in ticks] == list(range(len(ticks)))
     assert src.where()[0] == Rect(300, 100, 1280, 720)
+
+
+def test_overlay_covers_what_is_captured_when_the_window_hangs_off_the_screen(monkeypatch):
+    desk = _Desk(monkeypatch)
+    monkeypatch.setattr(window, "client_rect", lambda h: Rect(-101, 50, 1281, 721))
+    src = WindowSource(WINDOWS[0], size=(640, 360), open_fn=desk.open)
+    assert src.where() == (Rect(0, 50, 1180, 720), MON)  # the on-screen part, even sizes: the frame is exactly that
+
+
+def test_overlay_draws_the_frame_over_the_whole_window():
+    # The frame is the app's window squeezed to the stream's size: it's stretched back to fill the overlay, not
+    # letterboxed to 16:9 (which squeezed a browser window's picture and covered part of it with bars)
+    from framegen.io import GLWindowSink
+    sink = GLWindowSink.__new__(GLWindowSink)
+    sink.w, sink.h, sink.dx = 1920, 1080, None
+    sink.glfw = type("G", (), {"get_framebuffer_size": staticmethod(lambda win: (2560, 1305))})()
+    sink.win, sink.overlay_of = None, lambda: None
+    assert sink._layout()[3:] == (2560, 1305, 0, 0)
+    sink.overlay_of = None  # its own window: letterboxed, aspect kept
+    assert sink._layout()[3:] == (2320, 1305, 120, 0)
 
 
 def test_source_refuses_a_minimised_window(monkeypatch):
@@ -333,3 +414,27 @@ def test_open_window_scales_to_the_streams_size(monkeypatch):
     monkeypatch.setattr(window, "_cuda", lambda: False)
     src = window.open_window("ps-remote-play")
     assert (src.w, src.h) == window.SIZE == (1920, 1080)
+
+
+
+def test_a_running_streaming_app_left_off_the_list_says_why(monkeypatch):
+    shell = _Shell(monkeypatch)
+    u32 = window._api()[0]
+    hidden, cloaked = {400}, set()
+    monkeypatch.setattr(u32, "IsWindowVisible", lambda h: h not in hidden, raising=False)
+    monkeypatch.setattr(window._api()[2], "DwmGetWindowAttribute",
+                        lambda h, attr, ref, size: setattr(ref._obj, "value", int(h in cloaked)) or 0, raising=False)
+    left_out: dict = {}
+    window.find_windows(left_out)
+    assert left_out == {}  # the Xbox app's Store version is listed, so nothing is missing
+
+    monkeypatch.setitem(shell.TOP, 100, ("applicationframehost.exe", "Xbox", []))  # ...and now it's suspended
+    window.find_windows(left_out)
+    assert left_out == {"xboxpcappce.exe": {"no window on screen"}}  # in the tray
+
+    hidden.clear()
+    cloaked.add(400)
+    left_out = {}
+    window.find_windows(left_out)
+    assert left_out == {"xboxpcappce.exe": {"on another desktop, or not shown yet"}}
+    assert "explorer.exe" not in str(left_out) and "Documents" not in str(left_out)  # other apps are never noted

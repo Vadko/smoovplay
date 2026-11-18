@@ -56,7 +56,7 @@ KINDS = {
     "window": SourceInfo("window", "App window", rate="variable", test_mode=False,
                          audio="The app plays its own sound, a little ahead of the picture",
                          controls="Your controller connects to the app as usual"),
-    "tap": SourceInfo("tap", "Frame tap", audio="The app plays its own sound",
+    "tap": SourceInfo("tap", "Frame tap (for developers)", audio="The app plays its own sound",
                       controls="Your controller connects to the app as usual"),
     "file": SourceInfo("file", "Video file", live=False),
     "sim": SourceInfo("sim", "Video file as a PS5 30 fps game", live=False, test_mode=False),
@@ -226,10 +226,12 @@ GUIDES = {
                "while you use it (Settings > System > HDMI). Set the console to 1080p, 60 Hz, HDR off.",
     "window": "Open the app you stream with (PS Remote Play, the Xbox app, Moonlight, or a browser) and start the "
               "game, pick its window, then press Play. Keep the app's window on screen: SmoovPlay shows the smooth "
-              "picture on top of it, and the app keeps the controller.",
-    "tap": "For apps that send their frames straight to SmoovPlay (docs/frame-tap.md in SmoovPlay's repo): press "
-           "Play, then start the app. Its smooth video opens in its own window; the app keeps the controller and "
-           "its sound.",
+              "picture on top of it, and the app keeps the controller and the keyboard. SmoovPlay's own keys use Ctrl+Alt "
+              "(Ctrl+Alt+M menu, Ctrl+Alt+F fullscreen, Ctrl+Alt+Esc quit), and can be changed on the Play page.",
+    "tap": "For app developers: an app built to send its frames straight to SmoovPlay (docs/frame-tap.md in "
+           "SmoovPlay's repo). For the Xbox app, PS Remote Play, Moonlight or a browser, pick App window instead. "
+           "Press Play, then start the app: its smooth video opens in its own window, and the app keeps the "
+           "controller and its sound.",
     "file": "For testing: a video file played as a source.",
 }
 

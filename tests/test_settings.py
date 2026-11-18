@@ -303,6 +303,11 @@ def test_remote_restart_and_state(tmp_path):
     assert [s["restart"] for s in states()] == [["AI engine"], ["AI engine"]]
 
 
+def test_the_launchers_stop_quits_as_esc_does(tmp_path):
+    _, r, _ = _remote(tmp_path, ["restart", "quit", "restart"])
+    assert r.poll() == "quit"  # a Stop wins over a restart that came with it
+
+
 def test_rows_that_dont_apply_are_hidden_and_the_highlight_stays_put():
     from framegen.menu import Menu
     from framegen.settings import SPECS, Settings

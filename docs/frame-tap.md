@@ -7,7 +7,7 @@ tool, an OBS plugin, a game.
 
 > [!NOTE]
 > **Experimental.** Decoded frames are tested with a stand-in writer ([`scripts/frametap_send.py`](../scripts/frametap_send.py)),
-> not yet with another app. In the launcher it's **Frame tap** on the Play page; from a terminal, `run.py --source tap`
+> not yet with another app. In the launcher it's **Frame tap (for developers)** on the Play page; from a terminal, `run.py --source tap`
 > (see [Try it](#try-it)). The layout below is version 2 and may still change; a change will bump the version.
 
 ## Why not just capture the app's window?
