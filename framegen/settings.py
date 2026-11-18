@@ -119,7 +119,9 @@ SPECS: tuple[Spec, ...] = (
     # 96% of the visibly wobbling HUD pixels for 0.06 dB over the whole frame, at about 0.5 ms per real frame plus
     # 0.15 per AI frame. On three sections of PS5 GTA V it cost 0.1 to 1.2 dB over the whole frame. Off by default:
     # judged by eye (scripts/steady_hud_compare.py), RIFE alone looked as good.
-    Spec("steady_hud", "Steady HUD", (False, True), False, ON_OFF, group="Smoothness", applies=("model", ("4.22.lite",)),
+    # framegen/steady.py, after RIFE or NVIDIA VFG alike (with VFG, each in-between frame is also converted to apply it).
+    Spec("steady_hud", "Steady HUD", (False, True), False, ON_OFF, group="Smoothness",
+         applies=("model", ("4.22.lite", "vfg")),
          help="Keeps the parts of the picture that don't move, like the map, health bar and subtitles, exactly as "
               "the game drew them, so they don't wobble when the scene behind them moves. Results vary by game, and "
               "often there's no visible difference. If a small, fast object ever flickers, turn it off.",

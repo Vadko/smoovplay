@@ -80,6 +80,10 @@ class VfgInterpolator:
             self.slots = [torch.zeros((height, width), dtype=torch.int32, device=self.device) for _ in range(2)]
         else:
             self.slots = [torch.zeros((3, height, width), dtype=torch.float32, device=self.device) for _ in range(2)]
+        # Steady HUD (framegen/steady.py, set_steady): made the first time it's turned on, with the real frames kept
+        # as (1, 3, h, w) RGB halves beside VFG's own copies.
+        self.steady, self.hud, self.real = 0.0, None, None
+        self._slot: int | None = None  # the newest prepared slot
 
     # ---- the RifeInterpolator interface --------------------------------------------------------------------
     def load(self, frame_u8: torch.Tensor) -> None:
@@ -91,13 +95,18 @@ class VfgInterpolator:
 
     @torch.no_grad()
     def prepare(self, slot: int) -> None:
-        """Convert the input into slot `slot` (0/1) in VFG's input format."""
+        """Convert the input into slot `slot` (0/1) in VFG's input format; with Steady HUD on, also where it acts
+        between the previous real frame and this one."""
         if self.encoding == "rgb10a2":
             self.slots[slot].copy_(pack_rgb10a2(self.inp))
         elif self.hdr:
             self.slots[slot].copy_(self.inp.permute(2, 0, 1).flip(0).float())
         else:
             self.slots[slot].copy_(self.inp.permute(2, 0, 1).flip(0).float().div_(255.0))
+        if self.steady > 0:
+            self.real[slot].copy_(_rgb(self.inp, self.hdr))
+            self.hud.mask(1 - slot, slot, self.real[1 - slot], self.real[slot])
+        self._slot = slot
 
     @torch.no_grad()
     def interpolate(self, newest_slot: int, t: float = 0.5) -> torch.Tensor:
@@ -114,12 +123,53 @@ class VfgInterpolator:
             self.out_u8.copy_(img.clamp(0.0, 1.0).flip(0).permute(1, 2, 0))
         else:
             self.out_u8.copy_(img.clamp(0.0, 1.0).mul(255.0).round_().to(torch.uint8).flip(0).permute(1, 2, 0))
+        if self.steady > 0:  # Steady HUD: the real pixels where the HUD is
+            self.hud.t_now.fill_(t)
+            mid = self.hud.blend(_rgb(self.out_u8, self.hdr), self.real[1 - newest_slot], self.real[newest_slot])
+            _store(mid, self.out_u8)
         return self.out_u8
+
+    @torch.no_grad()
+    def set_steady(self, threshold: float) -> None:
+        """Steady HUD (framegen/steady.py) on (threshold: largest real-frame difference, 0..1, that counts as still)
+        or off (0). Turned on between two real frames, it takes them from VFG's own copies."""
+        if threshold > 0:
+            if self.hud is None:
+                from .steady import SteadyHud
+                self.hud = SteadyHud(self.h, self.w, self.device)
+                self.real = [torch.zeros((1, 3, self.h, self.w), dtype=torch.half, device=self.device)
+                             for _ in range(2)]
+            self.hud.still_thr.fill_(threshold)
+            if self.steady <= 0 and self._slot is not None:  # turned on mid-pair: the current pair's mask now
+                for s in (0, 1):
+                    self.real[s].copy_(self._slot_rgb(s))
+                old = 1 - self._slot
+                self.hud.edges(old, self.real[old])
+                self.hud.mask(old, self._slot, self.real[old], self.real[self._slot])
+        self.steady = threshold
+
+    def _slot_rgb(self, slot: int) -> torch.Tensor:
+        """A prepared real frame back from VFG's input format, as (1, 3, h, w) RGB."""
+        if self.encoding == "rgb10a2":
+            return _rgb(unpack_rgb10a2(self.slots[slot], hdr=self.hdr), self.hdr)
+        return self.slots[slot].unsqueeze(0)  # (already RGB, 0..1)
 
     def close(self) -> None:
         close = getattr(self.fx, "close", None)
         if close is not None:
             close()
+
+
+def _rgb(bgr: torch.Tensor, hdr: bool) -> torch.Tensor:
+    """An HxWx3 BGR frame (uint8, or float16 PQ with hdr) as (1, 3, H, W) RGB, 0..1, for Steady HUD."""
+    x = bgr.permute(2, 0, 1).flip(0).unsqueeze(0).float()
+    return x if hdr else x.div_(255.0)
+
+
+def _store(rgb: torch.Tensor, out: torch.Tensor) -> None:
+    """(1, 3, H, W) RGB 0..1 back into an HxWx3 BGR frame, in its own type (uint8, or float16 with hdr)."""
+    x = rgb[0].clamp(0.0, 1.0).flip(0).permute(1, 2, 0)
+    out.copy_(x if out.is_floating_point() else x.mul(255.0).round_().to(torch.uint8))
 
 
 # ---- packed 10-bit RGB: R in bits 0-9, G 10-19, B 20-29, alpha 30-31 (left 0, so it fits a signed int32) ------

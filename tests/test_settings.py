@@ -307,7 +307,8 @@ def test_rows_that_dont_apply_are_hidden_and_the_highlight_stays_put():
     menu.key("enter")  # still on the upscaler row, though the rows above and below changed
     assert st.scaler == "bilinear"
     st.set("model", "vfg")
-    assert "vfg_quality" in keys() and not {"engine", "motion", "steady_hud"} & set(keys())
+    assert "vfg_quality" in keys() and not {"engine", "motion"} & set(keys())
+    assert "steady_hud" in keys()  # Steady HUD works with NVIDIA VFG too (framegen/steady.py)
     menu.render()  # and it still draws, with the highlight where it was
     assert menu.rows()[menu.index][1].key == "scaler"
 

@@ -530,7 +530,7 @@ def main() -> int:
         rows.clear()
         rows.update(unavailable)
         if (test_model or settings.model) == "vfg":
-            for k in ("engine", "motion", "steady_hud"):
+            for k in ("engine", "motion"):
                 rows.setdefault(k, "Not used with NVIDIA VFG.")
         else:
             rows.setdefault("vfg_quality", vfg_why[0] or "Only used with NVIDIA VFG.")
