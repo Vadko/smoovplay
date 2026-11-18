@@ -527,6 +527,9 @@ namespace SmoovPlay
             var rb = new RadioButton { Style = S("Seg"), Content = name, Tag = value, GroupName = "set_" + row.Spec.Key };
             if (bar.Children.Count > 0) rb.Margin = new Thickness(2, 0, 0, 0);
             ToolTipService.SetShowOnDisabled(rb, true);  // why it's greyed out
+            // Under its own segment: at the mouse, a tooltip stays where the mouse came in (moving left along the row,
+            // the next segment's right edge), behind the mouse once it moves on.
+            ToolTipService.SetPlacement(rb, PlacementMode.Bottom);
             string hint = SegHint(row, value);
             AutomationProperties.SetName(rb, name);
             AutomationProperties.SetHelpText(rb, hint);
