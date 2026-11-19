@@ -372,7 +372,7 @@ def _hdr(settings: dict, reasons: dict, *, current: dict, hdr_display: bool, dml
     settings["hdr"] = "auto"
     reasons["hdr"] = ("Auto turns HDR on by itself for a PS5 streaming in HDR, and picks chiaki-ng's codec to match: "
                       + ("this display has Use HDR on in Windows, so the picture stays HDR all the way." if hdr_display
-                         else "this display doesn't have HDR on in Windows, so the PS5 is asked for SDR."))
+                         else "this display doesn't have HDR on in Windows, so an HDR stream is fitted to it."))
 
 
 def _upscaler(settings: dict, reasons: dict, *, current: dict, hz: int, left: float, fsr_ms: float, speed: float,

@@ -91,7 +91,7 @@ def test_hdr_off_from_before_gets_auto():
     r = pick(current={"hdr": "off"}, hdr_display=True)
     assert r["settings"]["hdr"] == "auto" and "stays HDR all the way" in r["reasons"]["hdr"]
     r = pick(current={"hdr": "off"}, hdr_display=False)
-    assert r["settings"]["hdr"] == "auto" and "asked for SDR" in r["reasons"]["hdr"]
+    assert r["settings"]["hdr"] == "auto" and "fitted to it" in r["reasons"]["hdr"]
     r = pick(current={"hdr": "off"}, vfg={"low": {"ms": 3.0}, "medium": {"ms": 4.0}, "high": {"ms": 5.0}})
     assert r["settings"]["model"] == "vfg" and r["settings"]["hdr"] == "auto"  # with NVIDIA VFG picked too
 

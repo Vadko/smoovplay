@@ -205,16 +205,16 @@ SPECS: tuple[Spec, ...] = (
     Spec("hdr", "HDR", ("auto", "off", "sdr", "hdr10"), "auto",
          {"auto": "Auto", "off": "Off", "sdr": "On, shown in SDR", "hdr10": "On, HDR output"}, live=False,
          group="Picture", experimental=True,
-         hints={"auto": "HDR output on a display with Use HDR on in Windows, shown in SDR on any other, and "
-                        "chiaki-ng's codec picked to match. The default.",
+         hints={"auto": "HDR output on a display with Use HDR on in Windows (chiaki-ng switched to its HDR codec), "
+                        "shown in SDR on any other. The default.",
                 "off": "Leaves HDR alone, and chiaki-ng's codec as you set it.",
                 "sdr": "Plays an HDR stream on any display, with its colours and brightness fitted to it.",
                 "hdr10": "Keeps it HDR on an HDR display, with Use HDR on in Windows' display settings. Tried "
                          "with a real PS5 on an HDR monitor."},
          help="Experimental. Auto picks chiaki-ng's H.265 HDR codec when your display has Use HDR on in Windows, "
-              "and keeps the PS5's HDR all the way to it; on any other display the PS5 sends SDR. Tried with a "
-              "real PS5 on an HDR monitor. On always asks for HDR. A stream without HDR isn't changed. Applies the "
-              "next time you press Play.",
+              "and keeps the PS5's HDR all the way to it; on any other display an HDR stream is fitted to it. Tried "
+              "with a real PS5 on an HDR monitor. On always asks for HDR. A stream without HDR isn't changed. Applies "
+              "the next time you press Play.",
          impact={"picture": "An HDR stream's true colours, instead of a washed-out picture.",
                  "speed": "About 0.7 ms of graphics card time for each frame from the game."}),
     # run.py asks the card for this size (framegen/capture.py pick_mode: else the largest it has under it). Every new
