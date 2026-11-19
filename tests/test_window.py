@@ -220,16 +220,46 @@ def test_source_refuses_a_minimised_window(monkeypatch):
         WindowSource(WINDOWS[0], open_fn=lambda spec: None)
 
 
-def test_source_gives_up_after_repeated_failures(monkeypatch):
+def test_source_keeps_trying_for_a_while_then_gives_up(monkeypatch, capsys):
+    """A capture that fails is tried again for RETRY_S (a screen mode change can take seconds), more slowly as it
+    goes, saying each reason once (issue 21: it gave up after five tries in two seconds)."""
     desk = _Desk(monkeypatch)
-    monkeypatch.setattr(window.time, "sleep", lambda s: None)
+    monkeypatch.setattr(window, "CHECK_S", 0.5)
+    clock = [0.0]
+    monkeypatch.setattr(window.time, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr(window.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    tries = []
 
     def broken(spec):
-        raise OSError("DXGI_ERROR_ACCESS_LOST")
+        tries.append(clock[0])
+        raise OSError("[Errno 542398533] Generic error in an external library")
 
     src = WindowSource(WINDOWS[0], open_fn=broken)
     assert list(src) == []
     assert desk.alive
+    assert tries[-1] - tries[0] >= window.RETRY_S and len(tries) <= 10
+    out = capsys.readouterr().out
+    assert out.count("capture stopped") == 1 and f"trying again for up to {window.RETRY_S:.0f} s" in out
+    assert out.count("keeps failing") == 1
+
+
+def test_capture_errors_say_windows_reason_in_words():
+    from types import SimpleNamespace
+
+    from framegen.dda import CaptureLost
+    from framegen.window import capture_error
+    generic = OSError("[Errno 542398533] Generic error in an external library")
+    said = capture_error(generic, "AcquireNextFrame failed: 887a0026")  # FFmpeg's line has Windows' code
+    assert said.startswith("AcquireNextFrame failed: 887a0026: ") and "changed mode" in said
+    assert "too many programs" in capture_error(RuntimeError("DuplicateOutput failed (HRESULT 0x887A0022)"))
+    assert "changed mode" in capture_error(CaptureLost("Desktop Duplication lost access"))
+    assert capture_error(generic) == str(generic)  # nothing more known: as it came
+    # FFmpeg's error lines from the capture just stopped: ddagrab's, over other errors and warnings
+    logs = [(16, "Parsed_scale_2", "something else"), (16, "Parsed_ddagrab_0", "AcquireNextFrame failed: 887a0026\n"),
+            (24, "Parsed_ddagrab_0", "a warning")]
+    me = SimpleNamespace(_ffmpeg_logs=logs)
+    assert WindowSource._ffmpeg_error(me) == "AcquireNextFrame failed: 887a0026"
+    assert me._ffmpeg_logs == [] and WindowSource._ffmpeg_error(me) == ""
 
 
 # ----------------------------------------------------------------------------- the source list and the detector

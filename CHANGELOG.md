@@ -1,5 +1,195 @@
 # Changelog
 
+## 0.3.10
+
+**Capture cards** (Experimental)
+- **Game frame rate: 30 fps no longer hitches on a capture card** ([#20](https://github.com/smoovplay/smoovplay/issues/20)).
+  When the PC fell behind for a moment and a frame was dropped, SmoovPlay lost count of which frames were new, and
+  catching up a moment later showed as a hitch. Frames are now numbered as they come off the card, so a dropped one
+  no longer moves the count.
+- **The card's sound is found on AVerMedia cards** ([#23](https://github.com/smoovplay/smoovplay/issues/23)). Names
+  ending in "-Video" and "-Audio" now match, and AVerMedia's extra sound device called "Not To Use" is never picked.
+  Before, the two tied and SmoovPlay played the picture without sound.
+
+**App window** (Experimental)
+- **Capture keeps trying for 10 seconds when Windows takes it away**
+  ([#21](https://github.com/smoovplay/smoovplay/issues/21)), for example when the screen changes mode. It used to
+  give up after two seconds. The log now says Windows' reason in words.
+
+**Setup**
+- **SmoovPlay installs into a folder whose name has letters outside English**
+  ([#24](https://github.com/smoovplay/smoovplay/issues/24)), such as Chinese, or an accented Windows user name.
+  Setup's "Optimise for your graphics card" step failed there.
+
+**Test mode**
+- **Simulate a 30 fps game turns itself off on a game that's at 30 fps already**
+  ([#26](https://github.com/smoovplay/smoovplay/issues/26)). It halved such a game to 15 fps, which stutters. It
+  stays on through a 60 fps game's 30 fps cutscenes. In the video window's menu (M) it's now under Smoothness, next
+  to Game frame rate.
+
+**Diagnostics**
+- **The log says how evenly the game's frames arrived** ([#25](https://github.com/smoovplay/smoovplay/issues/25)):
+  frames that came late or bunched together point at Wi-Fi or the capture, not the PC.
+- **Copy diagnostics includes your last game session's log**, also when copied right after setup.
+
+## 0.3.9
+
+**Display**
+- **The screen no longer goes black mid-game.** Windows turns the screen off after a while without mouse or
+  keyboard input (15 minutes on many PCs), and a controller doesn't count, so the screen could go black until you
+  clicked. While the video plays, SmoovPlay now asks Windows to keep the screen on, as video players and games do.
+- **Smaller stats overlays, out of the way of the game's HUD.** Both styles sit right in the corner, inside the
+  margin games keep clear of their own HUD. Detailed is now a small box like Minimal's, not a strip across the top.
+  New in Settings, Display (and the video window's menu, M): **Stats overlay position**, any corner, and **Stats
+  overlay size**: Small (the default), Medium, or Large for a TV across the room.
+
+## 0.3.8
+
+**Settings**
+- **Capture card resolution is greyed out unless a capture card is your source** (picked on the Play page), with a
+  note saying why: PS5 Remote Play streams 1080p at most, and App window capture is scaled to 1080p. Before, you
+  could pick 1440p or 4K with Remote Play and nothing changed. **Minimise chiaki-ng** is greyed out the same way
+  unless PS5 Remote Play is picked. Switches that can't be changed now look it.
+
+**Frame tap** (Experimental, for app developers)
+- **Another app's frames aren't called chiaki-ng any more** ([#18](https://github.com/smoovplay/smoovplay/issues/18)).
+  For an app sending compressed video through the frame tap, the log says "[tap] frames: ..." and the notes say
+  "the app", and a chiaki-ng running on its own is no longer minimised.
+
+## 0.3.7
+
+**AMD and Intel graphics** (Experimental)
+- **chiaki-ng draws with OpenGL on AMD and Intel graphics** ([#19](https://github.com/smoovplay/smoovplay/issues/19),
+  a Radeon RX 9070 XT). chiaki-ng's default, Vulkan (which also decodes with Vulkan), crashed there. SmoovPlay
+  shows the picture itself, so chiaki-ng's own window, hidden behind it, loses nothing. It's for SmoovPlay's
+  sessions only: chiaki-ng's saved setting stays as it is. On NVIDIA nothing changes.
+
+**Display**
+- **Fill the screen, for ultrawide screens** (Settings, Display; key **Z** in the video window;
+  [#19](https://github.com/smoovplay/smoovplay/issues/19)). Consoles only send a 16:9 picture, to a TV, a capture
+  card or Remote Play, so there's no more of the game to show: this isn't real ultrawide, just different ways of
+  laying out the same 16:9 picture. **Fit** keeps all of it with black bars (the default, as before). **Zoom** fills
+  the screen by cutting off the top and bottom, which can cut the HUD. **Stretch** makes everything wider.
+  **Panorama** keeps the middle close to its true shape and stretches the sides, like a TV's wide zoom. On the
+  launcher's Settings page, a small drawing beside the choices shows what each one does on your screen's shape.
+
+**Capture cards** (Experimental)
+- **Capture card resolution: 1080p, 1440p or 4K** (Settings, Picture). It was always 1080p. Higher is sharper on a
+  1440p or 4K screen, but every new frame is drawn at the size captured, so it can run quite sluggish: 1440p is
+  about twice the work of 1080p (fine at 60 fps on most cards), 4K about four times (likely sluggish even at 60 fps
+  on a fast card). 1080p stays the default. The console has to send that resolution too; a card without it uses the
+  largest it has under it. Motion detail on Auto goes to half for 1440p at 90 fps, and to a quarter for 4K.
+
+## 0.3.6
+
+**Picture**
+- **NVIDIA RTX VSR works in the installed app** (Experimental). The AI upscaler now comes with NVIDIA VFG's download
+  from NVIDIA (RTX 40 and 50 series), so once NVIDIA VFG is set up, Settings → Picture → Upscaler → NVIDIA RTX VSR
+  works, with nothing more to install. It runs an AI model on every frame, so at 90 and 120 fps it can cost some of
+  the extra frames; AMD FSR 1 stays the default. On a capture card's uncompressed picture it uses NVIDIA's models
+  for clean video. Not with HDR output yet.
+
+**Capture cards** (Experimental)
+- **Fewer pops in a capture card's sound, in heavy games too** ([#17](https://github.com/smoovplay/smoovplay/issues/17)).
+  0.3.5 fixed most of the popping, but a little was left in a heavy game. Three things could still cause it:
+  - SmoovPlay gave Windows only about 20 ms of sound at a time, and a busy moment in SmoovPlay could make the next
+    lot later than that. Windows now gets about 50 ms, taken off the sound's delay, so it stays in step.
+  - The card's sound is read along with the picture, so when that's held up for a moment the sound comes in a
+    burst. SmoovPlay now keeps as much sound as the longest recent wait (up to 150 ms) ready to play.
+  - When the picture's delay changed by more than 40 ms, the sound skipped or paused to catch up. Changes of up to
+    120 ms now play the sound 1% faster or slower until it's back in step instead.
+  If the sound does run out, it now fades out and back in, and pauses once until there's enough again, where
+  before it could click several times in a row.
+- **The log says how the sound played:** once a minute if anything went wrong, and for the whole session at the
+  end. Copy diagnostics includes it.
+
+## 0.3.5
+
+**Capture cards** (Experimental)
+- **No more popping in a capture card's sound** ([#17](https://github.com/smoovplay/smoovplay/issues/17), an Elgato
+  HD60 X). The card's sound comes in 20 ms packets, and when the picture's delay was shorter than that (31 ms with
+  NVIDIA VFG at 120 fps, less the sound output's own delay), SmoovPlay's sound ran out before the next packet: a
+  short gap many times a second, heard as pops as loud as the game. It now always keeps a packet and a little more
+  queued, so at worst the sound is about 20 ms later than the picture. The log says if the sound ever ran dry.
+
+**Settings**
+- **The launcher's Upscaler list says RTX VSR isn't in the installed app yet**
+  ([#17](https://github.com/smoovplay/smoovplay/issues/17)). It needs NVIDIA's RTX Video SDK, which can't be
+  included, so picking it used AMD FSR 1, and the list didn't say so.
+
+## 0.3.4
+
+**Dip smoothing** (Experimental, please send feedback)
+- **New: Dip smoothing** (Settings → Smoothness, off by default), made to help 30 fps games that sometimes drop
+  below 30, as big open-world games like GTA VI may at times on a base console. At each dip a frame stays on screen
+  for 50 or 67 ms instead of 33 and the next one jumps, and the smooth motion around it makes the hitch stand out.
+  With Dip smoothing on, SmoovPlay spaces the frames it draws by when the game's frames really arrived, so a dip
+  looks like a brief slow-down instead of a freeze and a jump. It turns itself on after two dips within a second and
+  off 3 s after the last, so a game holding a steady 30 is unchanged. Works with Game frame rate Auto or 30 fps.
+- **It's experimental.** It's been tried on simulated dipping games and a stand-in PS5, not yet on a real game that
+  dips. While it's smoothing it adds 17 to 50 ms of delay (more for longer dips, and more at 90 fps than at 60 or
+  120), and every frame shown is a generated one, so the graphics card works harder: on a busy card some of the
+  extra 90 or 120 fps frames fall back to 60 (in our test at 90 fps, 79-83% were shown against 97% with it off). If
+  you try it, tell us how it went in a [GitHub issue](https://github.com/smoovplay/smoovplay/issues).
+
+**Play**
+- **The in-video menu is in sections, so it's no longer one long list.** Press M: the main page has the quick picks
+  (Frame generation, Output frame rate, Upscaler) and a row for each section (Smoothness, Picture, Looks, Display,
+  Instant replay, PS5 Remote Play), as on the launcher's Settings page. Enter opens a section and Esc goes back; M
+  closes the menu from anywhere, and it opens again where you left it. It's about two thirds the height it was.
+- **Auto tells a PS5 Remote Play game's new frames from its repeats by the picture**, as App window already did.
+  It went by each frame's compressed size, which misread locked 30 fps games: a repeat can be nearly half a new
+  frame's size, and after any still scene (a menu, a pause) the size check stopped answering for the rest of the
+  session. Replayed over frame logs from real 30 fps sessions, Auto now calls 93-99% of repeats right over
+  Ethernet (83% over Wi-Fi), where it called 3-35% right, and switches Even out 40-60 on by mistake for 0-5% of
+  the time instead of 3-23%. Game frame rate 30 fps works as before.
+
+**Fixes**
+- **The delay figure, and Sound in sync, which follows it, are a little more exact with Even out 40-60 on.** A frame
+  now counts as on screen when it's first drawn as itself, not only once its moment has passed, which for some
+  games counted it up to a tick late (about 5 ms too much on average for a 45 fps game at 60 or 120 fps).
+- **The end-of-session stream check no longer gets stuck after a still scene** and reports the game's frame rate
+  from the whole session.
+
+## 0.3.3
+
+**Fixes**
+- **Game frame rate 30 fps no longer judders back and forth when a game dips below 30.** When a game missed a frame
+  (showing one for 50 ms instead of 33), the 30 fps setting could be a frame out of step for up to a second: it
+  showed the game's next frame, then the in-between frame from before it. It now keeps every frame in order, one
+  frame later until it's back in step. Auto wasn't affected.
+
+## 0.3.2
+
+**Play**
+- **Steady HUD works with NVIDIA VFG too**, not only RIFE: the map, health bar and subtitles stay as the game drew
+  them while the scene behind them moves. Still off by default (Settings, Smoothness). Thanks to
+  [@Vadko](https://github.com/Vadko) ([#11](https://github.com/smoovplay/smoovplay/pull/11))!
+- **Auto-detect tells RTX 40 and 50 series owners their card can run NVIDIA VFG**, with a button to set it up.
+  Nothing is downloaded until you accept NVIDIA's licence, and once it's set up, Auto-detect times it and suggests it
+  if it keeps up. Thanks to [@Vadko](https://github.com/Vadko) ([#7](https://github.com/smoovplay/smoovplay/pull/7))!
+
+**Fixes**
+- **Fullscreen keeps Windows' HDR on.** With Use HDR on in Windows, fullscreen switched the display to SDR while the
+  video was in front and back to HDR with every Alt+Tab or click, so the colours kept changing (and fullscreen could
+  look yellowish). With Windows' HDR on, the video window now uses the DXGI presentation, and fullscreen is a
+  borderless window, so the display stays in HDR. Thanks to [@Vadko](https://github.com/Vadko)
+  ([#6](https://github.com/smoovplay/smoovplay/pull/6))!
+- **Each choice on the Settings page shows its own tooltip** as the mouse moves along a row (AMD FSR 1, NVIDIA RTX
+  VSR, Bilinear), instead of the first one's staying up. Thanks to [@Vadko](https://github.com/Vadko)
+  ([#10](https://github.com/smoovplay/smoovplay/pull/10))!
+
+**Capture cards** (Experimental)
+- **Sound from cards that carry it on their video device**, as the AVerMedia Live Gamer 4K (GC573) does
+  ([#9](https://github.com/smoovplay/smoovplay/issues/9)). SmoovPlay only looked for a separate sound device named
+  like the card; when there's none, it now tries the card itself, and plays the picture alone if that has no sound
+  either.
+
+**Setup**
+- **A folder Windows won't let SmoovPlay write to is caught before installing**, such as a Program Files folder on
+  another drive ([#9](https://github.com/smoovplay/smoovplay/issues/9)). Setup used to stop with an "access denied"
+  error; it now tries writing there first (leaving nothing behind) and asks for another folder.
+
 ## 0.3.1
 
 **Play**

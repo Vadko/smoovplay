@@ -207,6 +207,7 @@ def test_source_plays_a_raw_file_like_a_card(tmp_path, device):
     assert [t.index for t in ticks] == list(range(6))
     assert all(t.t_ready >= t.t_arrival for t in ticks)
     assert [round(t.t_source * 240) for t in ticks] == list(range(6))  # the "card's" clock, frame by frame
+    assert [t.extra["seq"] for t in ticks] == list(range(6))  # numbered as they came off the card
     frames = [t.frame.numpy() if device else t.frame for t in ticks]
     for got, want in zip(frames, [a, a, b, b, b, a]):
         assert np.abs(_centres(got, block).astype(int) - _centres(want, block)).max() <= 4
@@ -263,3 +264,21 @@ def test_mjpeg_falls_back_to_the_cpu_when_the_gpu_cant(tmp_path, monkeypatch, ca
     assert len(ticks) == 2 and not src._gpu_jpeg
     assert "decoding on the CPU instead" in capsys.readouterr().out
     assert np.abs(ticks[0].frame.numpy().astype(int) - frames[0]).mean() < 6
+
+
+def test_frames_keep_the_cards_numbers_when_the_queue_drops_some(tmp_path):
+    """A frame dropped from the queue (the PC behind for a moment) leaves a gap in the numbers rather than shifting
+    them: Game frame rate 30 fps counts by them (cadence.RhythmLock), and a shift made its beat move, a hitch."""
+    import time
+    frames = [_blocks(seed=s)[0] for s in range(30, 50)]
+    h, w = frames[0].shape[:2]
+    path = _raw_file(tmp_path, frames)
+    src = c.CardSource.raw_file(path, w, h, "nv12", fps=240, device="cpu", colour=(False, False), queue_size=1)
+    ticks = []
+    for t in src:
+        ticks.append(t)
+        time.sleep(0.02)  # slower than the "card" (240 fps): the queue drops frames
+    src.close()
+    seqs = [t.extra["seq"] for t in ticks]
+    assert len(ticks) < len(frames)
+    assert seqs == sorted(set(seqs)) and seqs == [round(t.t_source * 240) for t in ticks]

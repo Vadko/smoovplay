@@ -4,10 +4,11 @@
 
 Copies the tap into gui/ (frametap.c/.h: the shared memory; frametap_session.cpp/.h: what it does inside chiaki-ng's
 StreamSession) and makes one-line edits to chiaki-ng's own files: six calls in gui/src/streamsession.cpp, one
-friend line in gui/include/streamsession.h (the tap reaches the session's sound output and controller state), and
-the new files in gui/CMakeLists.txt. Each edit is an exact-text replacement that must match once, so a chiaki-ng
-change that moves the code fails loudly here instead of building something subtly wrong; with one-line edits, a
-new chiaki-ng is quick to fix up. Running it twice is a no-op. A source patched by an older version (with the tap's
+friend line in gui/include/streamsession.h (the tap reaches the session's sound output and controller state), the
+new files in gui/CMakeLists.txt, and one check in gui/src/qmlmainwindow.cpp (CHIAKI_FRAMETAP_RENDERER=opengl: OpenGL
+for that session, which SmoovPlay asks for on AMD and Intel graphics, where chiaki-ng's Vulkan has crashed). Each
+edit is an exact-text replacement that must match once, so a chiaki-ng change that moves the code fails loudly here
+instead of building something subtly wrong; with one-line edits, a new chiaki-ng is quick to fix up. Running it twice is a no-op. A source patched by an older version (with the tap's
 code inside streamsession.cpp) has to be restored first:
 git checkout -- gui/src/streamsession.cpp gui/CMakeLists.txt
 
@@ -53,6 +54,22 @@ EDITS = [
 HEADER_EDIT = ("\tfriend class StreamSessionPrivate;\n",
                "\tfriend class StreamSessionPrivate;\n\tfriend class FrameTapSession;\n")
 
+# SmoovPlay draws the stream itself, and asks for OpenGL on cards where chiaki-ng's Vulkan has crashed: this session
+# only (chiaki-ng's own test switch below it shows a dialog; the saved setting, shared with a standalone chiaki-ng,
+# stays as it is).
+RENDERER_EDIT = (
+    '    if (render_backend == RenderBackend::Vulkan) {\n'
+    '        if (qEnvironmentVariableIsSet("CHIAKI_FORCE_VULKAN_FALLBACK")) {\n',
+    '    if (render_backend == RenderBackend::Vulkan) {\n'
+    '        if (qEnvironmentVariable("CHIAKI_FRAMETAP_RENDERER") == QLatin1String("opengl")) {\n'
+    '            // SmoovPlay, which draws the stream itself, asks for OpenGL on cards where Vulkan has crashed: this '
+    'session only, no dialog\n'
+    '            fallbackToOpenGL(QStringLiteral("SmoovPlay asked for OpenGL (CHIAKI_FRAMETAP_RENDERER)"));\n'
+    '            pending_renderer_fallback_reason.clear();\n'
+    '            goto renderer_backend_ready;\n'
+    '        }\n'
+    '        if (qEnvironmentVariableIsSet("CHIAKI_FORCE_VULKAN_FALLBACK")) {\n')
+
 CMAKE_EDIT = ("\tsrc/streamsession.cpp\n",
               "\tsrc/streamsession.cpp\n\tinclude/frametap.h\n\tsrc/frametap.c\n"
               "\tinclude/frametap_session.h\n\tsrc/frametap_session.cpp\n")
@@ -95,6 +112,7 @@ def main() -> int:
     patch_file(gui / "src" / "streamsession.cpp", EDITS, MARK)
     patch_file(gui / "include" / "streamsession.h", [HEADER_EDIT], "friend class FrameTapSession;")
     patch_file(gui / "CMakeLists.txt", [CMAKE_EDIT], "src/frametap_session.cpp")
+    patch_file(gui / "src" / "qmlmainwindow.cpp", [RENDERER_EDIT], "CHIAKI_FRAMETAP_RENDERER")
     return 0
 
 

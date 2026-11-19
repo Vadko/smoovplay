@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import importlib
 import math
-import os
 import subprocess
 import urllib.error
 import urllib.request
@@ -27,6 +26,8 @@ import torch
 import torch.nn.functional as F
 
 from .fastrife import FastIFNet
+# Steady HUD (shared with NVIDIA VFG); its constants are still importable from here, as before
+from .steady import STEADY_HUD_EDGE, STEADY_HUD_EDGE_R, STEADY_HUD_THRESHOLD, SteadyHud  # noqa: F401
 from .sync import CAPTURE_LOCK
 
 # version -> (module name, padding modulo). Modulo values match vs-rife.
@@ -38,13 +39,6 @@ MODELS: dict[str, tuple[str, int]] = {
 }
 WEIGHTS_URL = "https://github.com/HolyWu/vs-rife/releases/download/model/flownet_v{version}.pkl"
 DEFAULT_MODEL_DIR = Path(__file__).resolve().parent.parent / "models"
-# Steady HUD: the largest difference between the two real frames (0..1 per colour channel) at which a pixel still
-# counts as unchanged. 0.03 is about 8 of 255 levels: above Remote Play's compression noise on a still HUD.
-STEADY_HUD_THRESHOLD = float(os.environ.get("FRAMEGEN_STEADY_THRESHOLD", "0.03"))  # env: for tuning only
-# ...and only within this many pixels of an edge: Sobel L1 of brightness (0..1) above STEADY_HUD_EDGE, about a
-# 32-level step. See _steady.
-STEADY_HUD_EDGE = 128.0 / 255.0
-STEADY_HUD_EDGE_R = 1
 
 
 def ensure_weights(version: str, model_dir: Path = DEFAULT_MODEL_DIR) -> Path:
@@ -124,15 +118,10 @@ class RifeInterpolator:
         self.grid = torch.cat([gx, gy], 1).contiguous()
         self.timestep = torch.full((1, 1, ph, pw), 0.5, dtype=dt, device=dev)
         self._t = 0.5
-        # Steady HUD (see _steady): read by the captured graphs, so changing them needs no recapture.
+        # Steady HUD (framegen/steady.py): its tensors are read by the captured graphs, so changing them (t_now,
+        # still_thr) needs no recapture.
         self.steady = 0.0
-        self.t_now = torch.full((1, 1, 1, 1), 0.5, device=dev)
-        self.still_thr = torch.full((1, 1, 1, 1), STEADY_HUD_THRESHOLD, device=dev)
-        gx = torch.tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]], device=dev)
-        self.sobel = torch.stack([gx, gx.t()]).unsqueeze(1).half()  # (2, 1, 3, 3): x and y gradients
-        self.luma = torch.tensor([0.299, 0.587, 0.114], device=dev).view(1, 3, 1, 1).half()  # RGB
-        self.edge = [torch.zeros((1, 1, ph, pw), dtype=torch.half, device=dev) for _ in range(2)]  # see _edges
-        self.steady_w = torch.zeros((1, 1, ph, pw), device=dev)  # see _steady_mask
+        self.hud = SteadyHud(ph, pw, dev)
         self._slot: int | None = None  # the newest prepared slot
 
         # Static I/O buffers (graph inputs/outputs), in the frames' own format. in_u8: the input as 8 bits, for the
@@ -205,47 +194,21 @@ class RifeInterpolator:
         return (self.src[slot][:, :3] if self.fast is not None else self.img[slot]).float()
 
     def _steady(self, mid: torch.Tensor, a: int, b: int) -> torch.Tensor:
-        """Steady HUD: where a pixel is (almost) the same in both real frames, like a map, health bar or subtitle
-        over a moving scene, the AI frame takes the real pixel (blended at t, so fades still fade) instead of the
-        model's, which can drag it along with the motion behind it. The edge is soft: fully real below half the
-        threshold, fully the model's above it, so there's no speckle where the difference hovers near it.
+        """Steady HUD (framegen/steady.py): the real pixels where the HUD is, between real frames a and b."""
+        return self.hud.blend(mid, self._rgb(a), self._rgb(b))
 
-        Only near edges (within STEADY_HUD_EDGE_R pixels of a brightness step of about 32 levels, in either real
-        frame): text, icons and map lines, where wobble shows. On a flat background the model's pixel is kept, so a
-        pole or a car crossing a sky or road that matches before and after isn't painted over. On eight 60 fps
-        gameplay clips (scripts/steady_hud_eval.py) that keeps 96% of the fix on HUD-like pixels at a quarter of the
-        cost elsewhere.
-
-        Where it acts (steady_w) depends only on the two real frames, so _steady_mask works it out once per real
-        frame (after prepare) and each in-between frame just blends."""
-        return torch.lerp(mid.float(), torch.lerp(self._rgb(a), self._rgb(b), self.t_now), self.steady_w)
-
-    @torch.no_grad()
-    def _edges(self, slot: int) -> None:
-        """edge[slot]: 1 on a brightness edge of that real frame (worked out once per frame, in half precision)."""
-        lum = F.conv2d(self._rgb(slot).half(), self.luma)
-        g = F.conv2d(lum, self.sobel, padding=1).abs_().sum(1, keepdim=True)
-        self.edge[slot].copy_(g > STEADY_HUD_EDGE)
-
-    @torch.no_grad()
     def _steady_mask(self, a: int, b: int) -> None:
-        """steady_w for real frames a -> b: 1 where Steady HUD takes the real pixels, 0 where the model's stay.
-        The newest frame's edges are worked out here; the older one's were, when it was the newest."""
-        self._edges(b)
-        ia, ib = self._rgb(a).half(), self._rgb(b).half()
-        d = (ib - ia).abs_().amax(1, keepdim=True)
-        thr = self.still_thr.half()
-        w = ((thr - d) * (2.0 / thr)).clamp_(0.0, 1.0)
-        r = STEADY_HUD_EDGE_R
-        self.steady_w.copy_(w * F.max_pool2d(torch.maximum(self.edge[a], self.edge[b]), 2 * r + 1, 1, r))
+        """Where Steady HUD acts between real frames a -> b (once per real frame, after prepare)."""
+        self.hud.mask(a, b, self._rgb(a), self._rgb(b))
 
     def set_steady(self, threshold: float) -> None:
         """Steady HUD on (threshold: largest real-frame difference, 0..1, that counts as still) or off (0)."""
         if threshold > 0:
-            self.still_thr.fill_(threshold)
+            self.hud.still_thr.fill_(threshold)
             if self.steady <= 0 and self._slot is not None:  # turned on mid-pair: the current pair's mask now
-                self._edges(1 - self._slot)  # (the older frame's edges weren't worked out while it was off)
-                self._steady_mask(1 - self._slot, self._slot)
+                old = 1 - self._slot  # (the older frame's edges weren't worked out while it was off)
+                self.hud.edges(old, self._rgb(old))
+                self._steady_mask(old, self._slot)
         self.steady = threshold
 
     def _capture(self, fn) -> torch.cuda.CUDAGraph:
@@ -290,7 +253,7 @@ class RifeInterpolator:
                 self.fast.set_timestep(t)
             else:
                 self.timestep.fill_(t)
-            self.t_now.fill_(t)
+            self.hud.t_now.fill_(t)
             self._t = t
         steady = self.steady > 0
         if self.cuda_graph:

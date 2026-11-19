@@ -60,6 +60,32 @@ STORE_FRAME = "applicationframehost.exe"
 SKIP_EXE = {"explorer.exe", "textinputhost.exe", STORE_FRAME, "shellexperiencehost.exe",
             "searchhost.exe", "startmenuexperiencehost.exe", "systemsettings.exe", "smoovplay.exe"}
 CHECK_S = 0.5  # how often the window's place is looked at
+RETRY_S = 10.0  # capture that keeps failing is tried again for this long (a screen mode change can take seconds)
+
+# Why Windows took Desktop Duplication away or refused it: DXGI's codes, as FFmpeg's ddagrab and framegen/dda.py
+# give them (lower-case hex, without 0x).
+DXGI_REASONS = {
+    "887a0026": "Windows took the capture away: the screen changed mode (resolution, refresh rate, HDR, a program "
+                "going fullscreen) or a secure screen showed",
+    "80070005": "Windows' secure screen is up (a UAC prompt or the lock screen)",
+    "887a0022": "too many programs are capturing the screen at once (a recorder or an overlay)",
+    "887a0004": "this screen can't be captured from the main graphics card",
+    "887a002b": "the Windows session is remote or disconnected",
+    "887a0005": "the graphics driver stopped or restarted",
+}
+
+
+def capture_error(e: BaseException, ffmpeg: str = "") -> str:
+    """What stopped the capture, for the log: FFmpeg's own line when there is one (it has Windows' code, which the
+    exception's "Generic error in an external library" hasn't), else the error, with a known code in words."""
+    text = (ffmpeg or str(e)).strip()[:160]
+    low = f"{ffmpeg} {e}".lower()
+    if "lost access" in low:  # framegen/dda.py's CaptureLost
+        low += " 887a0026"
+    for code, words in DXGI_REASONS.items():
+        if code in low:
+            return f"{text}: {words}"
+    return text
 SIZE = (1920, 1080)  # what frames are scaled to, for the pipeline
 
 
@@ -434,6 +460,7 @@ class WindowSource:
         from .io import Tick
         u32, _, _ = _api()
         n, check, fails = 0, time.perf_counter() + CHECK_S, 0
+        failing, good, said = None, 0, ""  # when it started failing; frames since the last failure; the reason said
         while not self._stop:
             if not u32.IsWindow(self.target.hwnd):
                 print(f"[window] the {self.target.app} window closed")
@@ -450,7 +477,9 @@ class WindowSource:
                     if got is not None:
                         frame, t_arrival, t_source = got
                         yield Tick(frame, t_arrival, n, t_source=t_source, t_ready=time.perf_counter())
-                        n, fails = n + 1, 0
+                        n, good = n + 1, good + 1
+                        if good >= 30:  # working again (a capture opened anew hands over a frame before failing)
+                            fails, failing, said = 0, None, ""
                     if now >= check:
                         check = now + CHECK_S
                         if self._moved():
@@ -466,12 +495,17 @@ class WindowSource:
                     continue
                 if self._stop:
                     return
-                fails += 1
-                if fails >= 5:
-                    print(f"[window] capture keeps failing ({str(e)[:160]}); stopping")
+                why, now = capture_error(e, self._ffmpeg_error()), time.perf_counter()
+                fails, good = fails + 1, 0
+                failing = now if failing is None else failing
+                if now - failing >= RETRY_S:
+                    print(f"[window] capture keeps failing ({why}); stopping")
                     return
-                print(f"[window] capture stopped ({str(e)[:160]}); trying again")
-                time.sleep(CHECK_S)
+                if why != said:  # each reason once, not every try
+                    print(f"[window] capture stopped ({why}); trying again"
+                          + (f" for up to {RETRY_S:.0f} s" if fails == 1 else ""))
+                    said = why
+                time.sleep(min(2.0, CHECK_S * fails))  # 0.5, 1, 1.5, then every 2 s
                 self._moved()
             finally:
                 self._close_container()
@@ -488,9 +522,26 @@ class WindowSource:
             while not self._stop:
                 yield cap.grab(100)
         else:
-            self._container = self._open(graph(self._grab, self.w, self.h))
-            for frame in self._container.decode(video=0):
-                yield frame.to_ndarray(), time.perf_counter(), frame.time
+            # FFmpeg's own error lines, kept for the log: they have Windows' code (_ffmpeg_error)
+            import av.logging
+            old = av.logging.get_level()
+            if old is None or old < av.logging.ERROR:
+                av.logging.set_level(av.logging.ERROR)
+            try:
+                with av.logging.Capture() as self._ffmpeg_logs:
+                    self._container = self._open(graph(self._grab, self.w, self.h))
+                    for frame in self._container.decode(video=0):
+                        yield frame.to_ndarray(), time.perf_counter(), frame.time
+            finally:
+                av.logging.set_level(old)
+
+    def _ffmpeg_error(self) -> str:
+        """FFmpeg's last error line from the capture just stopped (ddagrab's, e.g. "AcquireNextFrame failed:
+        887a0026"), or ""."""
+        logs, self._ffmpeg_logs = getattr(self, "_ffmpeg_logs", None) or [], []
+        errors = [(str(name), str(msg).strip()) for level, name, msg in logs if level is not None and level <= 16]
+        mine = [msg for name, msg in errors if "ddagrab" in name]  # (16: av.logging.ERROR and worse)
+        return (mine or [msg for _, msg in errors] or [""])[-1]
 
     def _close_container(self) -> None:
         c, self._container = self._container, None

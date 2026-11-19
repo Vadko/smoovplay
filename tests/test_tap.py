@@ -161,6 +161,23 @@ def test_open_tap_variable_writer_gets_a_beat(tap):
         open_tap(NAME, wait_s=1, test=TestMode(True))
 
 
+def test_another_apps_compressed_frames_are_not_called_chiaki_ng(tap, capsys):
+    """GreenFrame-style: an app writes chiaki-ng's compressed layout. Same reader, its own wording: the launcher reads
+    "[tap] frames:" as the stream found, and nothing tells the player to use chiaki-ng."""
+    from framegen.tap import open_tap
+    tap.begin(0, 2560, 1440, 60)  # H.264, as an Xbox Remote Play stream
+    kind, src = open_tap(NAME, "sw", wait_s=1)
+    try:
+        assert kind == "chiaki" and src.app and src.info.name == "Frame tap"
+        tap.end()
+        why = src.why()
+    finally:
+        src.close()
+    out = capsys.readouterr().out
+    assert "[tap] frames: H.264 2560x1440, up to 60 fps" in out
+    assert "[chiaki]" not in out and "chiaki-ng" not in out and "chiaki-ng" not in why and "app" in why
+
+
 def test_make_detector_learns_for_the_tap():
     from framegen.sources import make_detector, source_info
     assert make_detector(source_info("tap")).learn

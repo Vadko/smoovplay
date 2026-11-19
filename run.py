@@ -62,7 +62,7 @@ from framegen.interpolator import MODELS, RifeInterpolator
 from framegen.io import (TICK, CaptureSource, FileSink, FileSource, GLWindowSink, MultiSink, Ps5SimSource,
                          WindowSink)
 from framegen.pipeline import Pipeline
-from framegen.settings import BY_KEY, DEFAULT_PATH, Settings
+from framegen.settings import BY_KEY, DEFAULT_PATH, SPECS, Settings
 from framegen.sources import TestMode, make_detector
 from framegen.vfg import vfg_unavailable
 
@@ -115,7 +115,7 @@ def write_results(path: str, sessions: list, size: str, settings: Settings) -> b
             lines += st.results(full_motion=False)  # no motion detail setting: the advice suggests a lower rate
             continue
         engine = "TensorRT" if cfg["engine"] == "trt" else "PyTorch"
-        motion = {1.0: "Full", 0.5: "Half"}.get(cfg["motion"], f"{cfg['motion']:g}x")
+        motion = {1.0: "Full", 0.5: "Half", 0.25: "Quarter"}.get(cfg["motion"], f"{cfg['motion']:g}x")
         lines += ["", head + f"{engine}, motion detail {motion}, RIFE {cfg['model']}"]
         lines += st.results(full_motion=cfg["motion"] >= 1)
     try:
@@ -176,8 +176,11 @@ def open_capture(a, w: int, h: int, test):
         if a.capture_audio == "auto":
             audio_device = capture.pick_audio(name, devices)
             if audio_device is None:
-                print("[capture] no sound device named like the card, so no sound: pick one with --capture-audio "
-                      "(see --list-devices)")
+                # Some cards carry their sound on the video device itself (in OBS: Video Capture Device with no custom
+                # audio device), not as a sound device of their own, e.g. the AVerMedia GC573: try that. FFmpeg looks
+                # for a video device with a sound pin by that name; CardSource.open plays the picture alone if not.
+                audio_device = name
+                print("[capture] no sound device named like the card: trying the card's own sound")
         elif a.capture_audio.isdigit() and int(a.capture_audio) < len(audio):
             audio_device = audio[int(a.capture_audio)]
         else:
@@ -242,7 +245,8 @@ def main() -> int:
     ap.add_argument("--capture", metavar="NAME|N|FILE",
                     help="a capture card by name or number (from --list-devices), or a video file standing in for "
                          "one (played in real time through the capture path, to test it without a card)")
-    ap.add_argument("--capture-size", default="1920x1080")
+    ap.add_argument("--capture-size", default=None, metavar="WxH",
+                    help="the size to ask the card for (default: Capture card resolution in the settings, 1080p)")
     ap.add_argument("--capture-fps", type=float, default=60.0)
     ap.add_argument("--capture-format", default="auto",
                     help="auto (NV12, then YUY2, then MJPEG: framegen/capture.py) or one the card lists")
@@ -302,6 +306,8 @@ def main() -> int:
     ap.add_argument("--vsync", action=argparse.BooleanOptionalAction, default=None,
                     help="vsync the window (use with G-Sync/FreeSync displays)")
     ap.add_argument("--fullscreen", action=argparse.BooleanOptionalAction, default=None, help="start fullscreen")
+    ap.add_argument("--fill", default=None, choices=BY_KEY["fill"].choices,
+                    help="on a screen that isn't 16:9: fit (bars), zoom (crops), stretch or panorama; all of them the same 16:9 picture")
     ap.add_argument("--hdr", default=None, choices=BY_KEY["hdr"].choices,
                     help="an HDR stream from PS5 Remote Play: auto (hdr10 on a display with Windows' HDR on, sdr on any "
                          "other), off (as before), sdr (tone-mapped to SDR) or hdr10 (HDR output, Experimental: an HDR "
@@ -353,6 +359,7 @@ def main() -> int:
             a.chiaki_decoder = "d3d11va"
 
     kind = a.source or ("chiaki" if a.chiaki else "capture" if a.capture is not None else "file" if a.video else None)
+    picked = kind  # as asked for: an app's compressed frames on the tap become "chiaki" below, without chiaki-ng
     # Test mode ("Simulate a 30 fps game") works with any 60 Hz source; a video file simulates a PS5 by itself
     # unless --raw plays it as-is.
     test = TestMode(a.test_mode) if kind in ("chiaki", "capture", "tap") or (kind == "file" and a.raw) else None
@@ -364,7 +371,7 @@ def main() -> int:
                        ("interp", False if a.off else None), ("vsync", a.vsync), ("fullscreen", a.fullscreen),
                        ("minimize_chiaki", a.minimize_chiaki), ("simulate_30", True if a.test_mode else None),
                        ("steady_hud", a.steady_hud), ("vfg_quality", a.vfg_quality), ("present", a.present),
-                       ("hdr", a.hdr)):
+                       ("hdr", a.hdr), ("fill", a.fill)):
         if value is not None:
             settings.override(key, value)
     if kind == "tap":
@@ -387,7 +394,13 @@ def main() -> int:
     elif kind == "capture":
         if a.capture is None:
             ap.error("--source capture needs --capture N (a device) or --capture FILE")
-        cw, ch = map(int, a.capture_size.split("x"))
+        if a.capture_size:
+            cw, ch = map(int, a.capture_size.split("x"))
+        else:  # Capture card resolution, from the settings
+            from framegen.settings import CAPTURE_SIZES
+            cw, ch = CAPTURE_SIZES[settings.capture_size]
+        print(f"[capture] asking the card for {cw}x{ch}" + ("" if (cw, ch) == (1920, 1080) else
+              " (Capture card resolution: every new frame is drawn at this size, so it costs more than 1080p)"))
         src = open_capture(a, cw, ch, test)
     elif kind == "window":
         if not a.window:
@@ -468,9 +481,12 @@ def main() -> int:
             return {"model": "vfg", "vfg_quality": settings.vfg_quality}
         if a.scale is not None:
             scale = a.scale
-        else:  # At 120 Hz three frames per 33 ms don't fit at full-resolution flow on an RTX 4070 Ti SUPER (~54 ms).
+        else:  # Auto. On an RTX 4070 Ti SUPER (scripts/benchmark.py), per 30 fps game frame (33 ms): 120 Hz at 1080p
+            # needs half (full ~54 ms with display work); 1440p at 90 too (38 ms; half 26); 4K even at 60 Hz needs a
+            # quarter (full 52 ms, half 36, quarter 30: its motion worked out at 960x540, as half's is at 1080p).
             scale = {"full": 1.0, "half": 0.5}.get(settings.motion) or (
-                0.5 if src.h > 1440 or settings.hz == 120 else 1.0)
+                0.25 if src.h > 1440 else
+                0.5 if settings.hz == 120 or (src.h > 1080 and settings.hz >= 90) else 1.0)
         engine = auto_engine(scale) if settings.engine == "auto" else settings.engine
         if dml_mode:
             engine = "dml"
@@ -537,7 +553,7 @@ def main() -> int:
         rows.clear()
         rows.update(unavailable)
         if (test_model or settings.model) == "vfg":
-            for k in ("engine", "motion", "steady_hud"):
+            for k in ("engine", "motion"):
                 rows.setdefault(k, "Not used with NVIDIA VFG.")
         else:
             rows.setdefault("vfg_quality", vfg_why[0] or "Only used with NVIDIA VFG.")
@@ -548,9 +564,7 @@ def main() -> int:
     print(f"[run] {src.w}x{src.h}  {describe(cfg)}  output {settings.hz} Hz")
     cfg, interp = build_or_rife(cfg)
 
-    unavailable = {}
-    if kind != "chiaki":
-        unavailable["minimize_chiaki"] = "Only used with PS5 Remote Play."
+    unavailable = {s.key: why for s in SPECS if (why := s.unused_with(picked or ""))}  # e.g. Capture card resolution
     if test is None:
         unavailable["simulate_30"] = ("Not with window capture yet." if kind == "window" else
                                       "Video files already play as a 30 fps game.")
@@ -584,13 +598,17 @@ def main() -> int:
               GLWindowSink(src.w, src.h, settings, restart_reasons, choices, unavailable,
                            overlay_of=src.where if kind == "window" else None, hdr=hdr10[0],
                            window_keys=window_keys if kind == "window" else None,
-                           hdr_peak=min(hdr_peak or 1e9, 1000.0)) if a.display else None)
+                           hdr_peak=min(hdr_peak or 1e9, 1000.0),
+                           clean_source=kind == "capture" and bool(getattr(src, "raw", False))) if a.display else None)
     if hdr10[0] and not getattr(window, "hdr10", False):  # the window couldn't present HDR10: shown in SDR
         hdr10[0], hdr_out, hdr_peak = False, "sdr8", None
         for k in hdr10_rows:
             unavailable.pop(k, None)
             if window is not None:
                 window.unavailable.pop(k, None)
+        if getattr(window, "keep_hdr", False):  # on 8-bit DXGI instead, as Windows' HDR is on: "present" stays fixed
+            window.note_presentation()
+            unavailable["present"] = window.unavailable["present"]
         interp = None
         gc.collect()
         torch.cuda.empty_cache()
@@ -609,7 +627,7 @@ def main() -> int:
     hidden: list[int] = []
 
     def minimize_chiaki(key: str = "minimize_chiaki") -> None:
-        if key != "minimize_chiaki" or not (kind == "chiaki" and window is not None):
+        if key != "minimize_chiaki" or not (picked == "chiaki" and window is not None):
             return
         from framegen.winutil import SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE, show, windows_of
         if settings.minimize_chiaki and not hidden:
@@ -625,7 +643,7 @@ def main() -> int:
         """For the video window's first seconds, and each time it's back in front after that (GLWindowSink.settle):
         chiaki-ng can show its window again just after the stream starts (its stream view opening), and Alt+Tab to it
         restores it, after it was minimised. Minimise it again."""
-        if not (kind == "chiaki" and settings.minimize_chiaki):
+        if not (picked == "chiaki" and settings.minimize_chiaki):
             return
         from framegen.winutil import SW_SHOWMINNOACTIVE, minimised, show, windows_of
         back = [h for h in windows_of("chiaki.exe") if not minimised(h)]
@@ -736,9 +754,10 @@ def main() -> int:
 
     ticks = iter(src)  # one stream for every session, so a restart doesn't reconnect or reopen anything
     if sink.sinks:  # playing on screen: keep frames on time when other programs are busy
-        from framegen.winutil import boost_gpu, boost_thread
+        from framegen.winutil import boost_gpu, boost_thread, keep_screen_on
         print(f"[run] scheduling: MMCSS {'on' if boost_thread() else 'off'}, "
-              f"GPU priority {'high' if boost_gpu() else 'normal'}")
+              f"GPU priority {'high' if boost_gpu() else 'normal'}, "
+              f"screen kept on {'yes' if keep_screen_on() else 'no'}")  # (a controller isn't input to Windows)
     try:
         while True:
             started.clear()
@@ -786,6 +805,9 @@ def main() -> int:
         for s in getattr(sink, "sinks", [sink]):
             if hasattr(s, "hide"):
                 s.hide()
+        if sink.sinks:  # the screen can turn off again, while clips finish saving
+            from framegen.winutil import keep_screen_on
+            keep_screen_on(False)
         if kind == "chiaki" and hasattr(src, "set_audio_delay"):
             src.set_audio_delay(0)  # chiaki-ng's sound back on time (it would also lapse once we stop)
         if hidden:
@@ -808,7 +830,8 @@ def main() -> int:
         for t, name in zip(tiles, ("previous real", f"RIFE ({p:.1f} dB)", "actual in-between", "next real")):
             cv2.putText(t, name, (15, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 0, 0), 5, cv2.LINE_AA)
             cv2.putText(t, name, (15, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.imwrite(a.save_worst, cv2.vconcat([cv2.hconcat(tiles[:2]), cv2.hconcat(tiles[2:])]))
+        from framegen.imagefile import write_image
+        write_image(a.save_worst, cv2.vconcat([cv2.hconcat(tiles[:2]), cv2.hconcat(tiles[2:])]))
         print(f"[run] worst frame (tick {tick}) -> {a.save_worst}")
     return 0
 

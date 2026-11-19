@@ -27,8 +27,9 @@ before it's shown, with what it knows about it:
 ## Two kinds of frames
 
 - **Compressed** (H.264 or H.265, layout version 1): what a streaming client receives, before decoding. SmoovPlay
-  decodes it on the graphics card (NVDEC). This is what chiaki-ng sends. A repeated frame costs an encoder almost
-  nothing (a few KB against tens of KB), so SmoovPlay tells repeats from the frame sizes without being told.
+  decodes it on the graphics card (NVDEC). This is what chiaki-ng sends. A decoded repeat is never an exact copy,
+  but changes far less than a new frame, so SmoovPlay tells repeats by comparing the pictures (it learns the line
+  between the two from the last few frames) without being told.
 - **Decoded** (NV12 or BGRA, layout version 2): finished pictures, for an app that only has those. SmoovPlay
   copies each one to the graphics card and converts it. Repeats are the app's word on each frame if it gives one
   ([slot flags](#slots)), else SmoovPlay compares the pictures.

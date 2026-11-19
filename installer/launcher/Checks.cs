@@ -387,6 +387,22 @@ namespace SmoovPlay
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool EnumDisplayDevices(string dev, int i, ref DISPLAY_DEVICE dd, int flags);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool EnumDisplaySettings(string dev, int mode, ref DEVMODE dm);
 
+        /// <summary>The widest shape among the connected displays (width over height, as set now), or 16:9 when none
+        /// can be read: the Settings page draws Fill the screen on it.</summary>
+        public static double WidestScreenRatio()
+        {
+            double best = 0;
+            var dd = new DISPLAY_DEVICE { cb = Marshal.SizeOf(typeof(DISPLAY_DEVICE)) };
+            for (int i = 0; EnumDisplayDevices(null, i, ref dd, 0); i++, dd.cb = Marshal.SizeOf(typeof(DISPLAY_DEVICE)))
+            {
+                if ((dd.StateFlags & 1) == 0) continue;  // DISPLAY_DEVICE_ATTACHED_TO_DESKTOP
+                var dm = new DEVMODE { dmSize = (short)Marshal.SizeOf(typeof(DEVMODE)) };
+                if (!EnumDisplaySettings(dd.DeviceName, -1, ref dm) || dm.dmPelsHeight <= 0) continue;
+                best = Math.Max(best, (double)dm.dmPelsWidth / dm.dmPelsHeight);
+            }
+            return best > 0 ? best : 16.0 / 9.0;
+        }
+
         /// <summary>The fastest refresh rate a connected display is set to, and the fastest it could be set to.</summary>
         static void Display(Check c)
         {
@@ -534,6 +550,31 @@ namespace SmoovPlay
         /// runtime\python\Lib\site-packages\ plus 121), so Windows' old 260-character limit, which applies while long
         /// paths are off, leaves room for an install folder of about 80 with a little to spare.</summary>
         public const int MaxDirLength = 80;
+
+        /// <summary>Why SmoovPlay can't write to this folder, or null if it can. Tried for real (a folder made in it,
+        /// or in the nearest one that exists, and removed straight away), as a folder Windows protects only shows by
+        /// refusing: a Program Files on another drive, say, which FolderProblem's name check doesn't know.</summary>
+        public static string WriteProblem(string dir)
+        {
+            const string NoAdmin = "Windows doesn't let SmoovPlay write to that folder without admin rights. Choose one in your user folder, or a folder of your own on any drive.";
+            if (Faked("readonlydir")) return NoAdmin;
+            string probe;
+            try { probe = Path.GetFullPath(dir.Trim()); }
+            catch (Exception) { return null; }  // FolderProblem says why
+            while (probe != null && !Directory.Exists(probe)) probe = Path.GetDirectoryName(probe);
+            if (probe == null) return null;
+            string test = Path.Combine(probe, ".smoovplay-write-test-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            try
+            {
+                Directory.CreateDirectory(test);
+                File.WriteAllText(Path.Combine(test, "test.txt"), "");
+                return null;
+            }
+            catch (UnauthorizedAccessException) { return NoAdmin; }
+            catch (IOException e) { return "SmoovPlay can't write to that folder (" + e.Message.Trim().TrimEnd('.') + "). Choose another one."; }
+            catch (Exception) { return null; }  // couldn't tell: the install says if it can't
+            finally { try { if (Directory.Exists(test)) Directory.Delete(test, true); } catch (Exception) { } }
+        }
 
         /// <summary>Why this folder won't do, or null if it's fine.</summary>
         public static string FolderProblem(string dir, out bool tooLong)

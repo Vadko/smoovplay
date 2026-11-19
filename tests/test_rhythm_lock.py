@@ -73,3 +73,20 @@ def test_lost_frames_dont_move_the_rhythm_when_counted_by_the_streams_numbers():
     out = [(i, lock.update(None, sizes[i], seq=seqs[i])) for i in keep]
     assert all(new == (i % 2 == 0) for i, new in out if i >= 40)
     assert lock.moves == 0
+
+
+def test_a_capture_cards_frames_dropped_from_the_queue_dont_move_the_rhythm():
+    """A capture card's frames are numbered as they come off it (framegen/capture.py), so the ones SmoovPlay's queue
+    drops when the PC falls behind leave gaps in the count. Counted as they arrived, each drop shifted the beat by a
+    tick, and moving to the new beat a moment later showed as a hitch (issue 20, against Simulate a 30 fps game)."""
+    rnd = random.Random(7)
+    calls = [(i % 2 == 0) if rnd.random() > 0.15 else (i % 2 == 1) for i in range(600)]  # 15% misread
+    keep = [i for i in range(600) if i not in (100, 230, 231, 377, 501)]
+    lock = RhythmLock()
+    out = [(i, lock.update(calls[i], seq=i)) for i in keep]
+    assert all(new == (i % 2 == 0) for i, new in out if i >= 40)
+    assert lock.moves == 0
+    as_they_came = RhythmLock()
+    for i in keep:
+        as_they_came.update(calls[i])
+    assert as_they_came.moves >= 2  # what it did before

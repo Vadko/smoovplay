@@ -221,15 +221,68 @@ def test_a_30_fps_game_gets_no_advice(monkeypatch):
     assert dict(sink.texts[-1].parts)["game 30"] == "dim" and sink.toasts == []
 
 
-def test_test_mode_on_a_30_fps_game_says_simulate_isnt_needed(monkeypatch):
+def _test_mode(settings):
+    """TestMode following the setting, as run.py ties them."""
+    tm = TestMode(settings.simulate_30)
+    settings.watch(lambda key: tm.set_on(settings.simulate_30) if key == "simulate_30" else None)
+    return tm
+
+
+def test_test_mode_on_a_30_fps_game_turns_itself_off(monkeypatch):
+    """Simulate on a game that's at 30 fps already plays it at 15 (issue 26: a session started with "Test with a 60
+    fps game" on a 30 fps game stuttered for ten minutes). It goes off by itself and says why; the game then plays
+    as it is."""
+    monkeypatch.setattr(pl, "RATE_NOTE_S", 0.0)
+    monkeypatch.setattr(pl, "RATE_TOAST_S", 0.0)
+    settings = Settings({"hz": 60, "overlay_style": "detailed"})
+    settings.set("simulate_30", True)
+    tm = _test_mode(settings)
+    sink = _Sink()
+    st = _pipeline().run(tm.wrap(_game(lambda i: i % 2 == 0)), sink, label="RIFE", settings=settings, gt=tm.gt)
+    assert not settings.simulate_30 and not tm.on
+    assert sink.toasts == [pl.SIMULATE_OFF.format(g=30)]
+    assert "TEST" not in sink.texts[-1] and "game 30 fps" in sink.texts[-1] and "\n" not in sink.texts[-1]
+    assert st.psnr_interp == []  # nothing fair to score against
+    assert 0 < st.test_game_new < 300 and st.actions["interp"] > 100
+
+
+def test_test_mode_stays_on_through_a_60_fps_games_30_fps_scene(monkeypatch):
+    """A 60 fps game seen at 60 since Simulate went on keeps it through a 30 fps stretch (a cutscene): the advice
+    says so, once, and Simulate stays on."""
     monkeypatch.setattr(pl, "RATE_NOTE_S", 0.0)
     monkeypatch.setattr(pl, "RATE_TOAST_S", 0.0)
     settings = Settings({"hz": 60})
     settings.set("simulate_30", True)
-    tm = TestMode(True)
+    tm = _test_mode(settings)
     sink = _Sink()
-    st = _pipeline().run(tm.wrap(_game(lambda i: i % 2 == 0)), sink, label="RIFE", settings=settings, gt=tm.gt)
-    assert sink.texts[-1].split("\n")[1] == rate_advice(30.0, True)
-    assert sink.toasts == [rate_advice(30.0, True)]
-    assert st.psnr_interp == []  # nothing fair to score against
-    assert st.test_game_repeat == st.test_game_new == 300
+    _pipeline().run(tm.wrap(_game(lambda i: i < 300 or i % 2 == 0, n=900)), sink, label="RIFE", settings=settings,
+                    gt=tm.gt)
+    assert settings.simulate_30 and tm.on
+    assert len(sink.toasts) == 1 and sink.toasts[0].startswith("Simulate") and "turned off" not in sink.toasts[0]
+
+
+def test_a_still_picture_doesnt_turn_test_mode_off(monkeypatch):
+    """A menu or a paused game (next to no new frames) isn't a 30 fps game."""
+    monkeypatch.setattr(pl, "RATE_NOTE_S", 0.0)
+    monkeypatch.setattr(pl, "RATE_TOAST_S", 0.0)
+    settings = Settings({"hz": 60})
+    settings.set("simulate_30", True)
+    tm = _test_mode(settings)
+    _pipeline().run(tm.wrap(_game(lambda i: i % 40 == 0)), _Sink(), label="RIFE", settings=settings, gt=tm.gt)
+    assert settings.simulate_30
+
+
+# ---- how evenly the game's frames arrived (issue 25: stutter, from the network or the PC?)
+def test_the_log_says_how_evenly_the_games_frames_arrived():
+    st = Stats()
+    assert st.arrival_line() == "" and "game frames" not in st.summary()
+    st.new_gaps_ms += [33.3] * 90 + [66.7] * 6 + [2.0] * 4  # a 30 fps game over Wi-Fi: some late, some bunched
+    line = st.arrival_line()
+    assert line == ("game frames as they arrived: 101 new, usually 33.3 ms apart; 6.0% late (over 1.5x that), "
+                    "4.0% bunched (under half); longest gap 67 ms")
+    assert line in st.summary() and line in Stats(**{**st.__dict__, "private": True}).summary()
+
+
+def test_a_session_logs_its_new_frames_arrival():
+    st = _pipeline().run(_game(lambda i: i % 2 == 0), _Sink(), label="RIFE", settings=Settings({"hz": 60}))
+    assert len(st.new_gaps_ms) == 299 and "game frames as they arrived: 300 new" in st.summary()

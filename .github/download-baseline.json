@@ -1,0 +1,11 @@
+{
+  "note": "Setup downloads GitHub counted before the release files were re-uploaded on 18 Nov 2026, which reset its counters. The download count adds these to GitHub's live counts.",
+  "taken": "2026-11-18T18:34Z",
+  "setup_downloads": {
+    "v0.3.2": 81,
+    "v0.3.1": 1360,
+    "v0.3.0": 331,
+    "v0.2.0": 302,
+    "v0.1.0": 29
+  }
+}

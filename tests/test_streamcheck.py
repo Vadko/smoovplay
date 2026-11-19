@@ -60,15 +60,16 @@ def test_game_hitches_are_the_games_not_misreads():
     assert any("held frames:" in line and "longest" in line for line in lines), lines
 
 
-def test_a_stuck_size_check_is_reported():
-    # A long hold (the game pausing for a sixth of a second) leaves the size check's window full of repeats, so
-    # new frames look far too big and go undecided (a known weakness: test_chiaki_tap's xfail). The check says so.
+def test_the_size_check_recovers_after_a_long_hold():
+    # A long hold (the game pausing for a sixth of a second) used to leave the size check's window full of repeats,
+    # so new frames looked far too big and went undecided for the rest of the session. Now many big frames recently
+    # are the new normal (test_chiaki_tap's test_size_detector_recovers_after_a_still_stretch).
     def pattern(i):
         k = i % 600
         return k % 2 == 0 if k < 590 else k == 594
     lines = play(pattern)
-    assert "undecided" in verdict(lines) and "Please send this report" in verdict(lines), lines
-    assert any("longest run" in line for line in lines), lines
+    assert "read this 30 fps game correctly" in verdict(lines), lines
+    assert "undecided" not in verdict(lines), lines
 
 
 def test_misreads_are_caught_by_the_picture():

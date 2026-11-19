@@ -69,7 +69,7 @@ def open_tap(name: str = DEFAULT_NAME, decoder: str = "cuda", wait_s: float = 60
     if h.codec not in CODECS:
         raise ValueError(f"the app sends frames in a format SmoovPlay doesn't know (codec {h.codec})")
     from .chiaki_tap import ChiakiSource
-    src = ChiakiSource(decoder, wait_s=wait_s, log_path=log_path, tap_name=name, test=test)
+    src = ChiakiSource(decoder, wait_s=wait_s, log_path=log_path, tap_name=name, test=test, app=True)
     src.info = replace(src.info, name="Frame tap", audio="The app plays its own sound",
                        controls="Your controller connects to the app as usual")
     return "chiaki", src

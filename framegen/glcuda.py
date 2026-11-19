@@ -86,7 +86,7 @@ _GRAPHICS_REGISTER_SURFACE_LOAD_STORE = 4
 
 
 class CudaGLImage:
-    """A GL_RGBA8 texture that CUDA kernels write through a surface object (e.g. RTX VSR's output).
+    """A GL texture that CUDA writes (RTX VSR's output): GL_RGBA8 through a surface object, or GL_R32UI by copies.
 
     map() gives the texture's CUDA array; unmap() hands it back to GL, ordered on the same stream.
     """

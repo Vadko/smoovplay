@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 from . import delaytest
-from .cadence import Action, CadenceScheduler, CutDetector, DuplicateDetector, FrameTimeline, RhythmLock
+from .cadence import Action, CadenceScheduler, CutDetector, DipWatch, DuplicateDetector, FrameTimeline, RhythmLock
 from .hdr import level8, to_u8
 from .interpolator import STEADY_HUD_THRESHOLD, RifeInterpolator
 from .io import TICK, MiniText, Waiting
@@ -110,6 +110,8 @@ class ShownRate:
 
 # How long the game has to stay off the rate that's needed before the overlay says so, and before the one-off message
 RATE_NOTE_S, RATE_TOAST_S = 3.0, 10.0
+# Said when "Simulate a 30 fps game" goes off by itself: the game was at 30 fps already, and Simulate halved it
+SIMULATE_OFF = "Simulate turned off: this game is at about {g} fps already, and Simulate halved that"
 
 
 def rate_advice(game_fps: float | None, test: bool, even: bool = False) -> str:
@@ -178,6 +180,10 @@ class Stats:
     uneven_ticks: int = 0
     uneven_fps: list = field(default_factory=list)
     uneven_waits: int = 0
+    dip_ticks: int = 0  # Dip smoothing: ticks played with frames timed as they arrived (waits count above)
+    # Time between the game's new frames as they reached SmoovPlay (stamped as they came off the stream, card or
+    # window, before any processing): late frames and bunches point at the network or the capture (arrival_line)
+    new_gaps_ms: list = field(default_factory=list)
     wall_s: float = 0.0
     exit: str = "end"  # why run() returned: "end" (source finished), "quit" or "restart" (asked by the sink)
     stale: int = 0  # frames skipped because they arrived before run() started (queued during a restart)
@@ -189,6 +195,20 @@ class Stats:
                     "allow sharing them and the log goes into Copy diagnostics. The stats overlay (S) and test mode's "
                     "report show them on this PC.")
 
+    def arrival_line(self) -> str:
+        """How evenly the game's new frames reached SmoovPlay, or "" for a short session. A steady stream has its
+        frames the same time apart (33 ms for a 30 fps game); Wi-Fi or a busy capture shows as late frames and
+        bunches (two close together after a late one), which look like stutter whatever the PC does."""
+        gaps = self.new_gaps_ms
+        if len(gaps) < 20:
+            return ""
+        usual = float(np.median(gaps))
+        late = sum(g > 1.5 * usual for g in gaps) / len(gaps)
+        bunched = sum(g < 0.5 * usual for g in gaps) / len(gaps)
+        return (f"game frames as they arrived: {len(gaps) + 1} new, usually {usual:.1f} ms apart; "
+                f"{100 * late:.1f}% late (over 1.5x that), {100 * bunched:.1f}% bunched (under half); "
+                f"longest gap {max(gaps):.0f} ms")
+
     def summary(self) -> str:
         def pct(xs, p):
             return float(np.percentile(xs, p)) if xs else float("nan")
@@ -198,6 +218,8 @@ class Stats:
             f"ticks={n}  wall={self.wall_s:.1f}s",
             f"actions: {dict(self.actions)}",
         ]
+        if arrival := self.arrival_line():  # (the game's frames, not the engine's work: in a private log too)
+            lines.append(arrival)
         tg = self.test_game_new + self.test_game_repeat
         if tg:
             lines.append(f"test mode: {self.test_game_repeat} of {tg} frames were repeats in the game itself (a steady "
@@ -205,6 +227,8 @@ class Stats:
         if self.uneven_ticks:
             lines.append(f"even timing (a game at about {np.median(self.uneven_fps):.0f} fps): {self.uneven_ticks} "
                          f"ticks, {self.uneven_waits} output frames waited for a late frame")
+        if self.dip_ticks:
+            lines.append(f"dip timing (a 30 fps game dipping below it): {self.dip_ticks} ticks")
         if self.private:
             if self.dedup:
                 lines.append(f"dedup vs truth: {dict(self.dedup)}")
@@ -299,6 +323,9 @@ class Stats:
         if self.uneven_ticks:  # (no figure: its median can round to 60, which read "about 60 fps, between 30 and 60")
             lines.append(f"Game: for {self.uneven_ticks / 60:.0f} s it ran between 30 and 60 fps, and its frames were "
                          "evened out (Even out 40-60 fps)")
+        if self.dip_ticks:
+            lines.append(f"Game: for {self.dip_ticks / 60:.0f} s it dipped below 30 fps, and its frames were spaced by "
+                         "when they arrived (Dip smoothing)")
         lines += list(self.delay_tests)
         if not interp:
             lines.append("Verdict: frame generation was off, so there's nothing to judge")
@@ -398,12 +425,19 @@ class Pipeline:
         # A 40-60 fps game: its frames' own timing, and evenly spaced frames from it (FrameTimeline). in_slot: which
         # frame (TimedFrame.id) is in each of the interpolator's two slots; timed frames go in only when needed.
         timeline, timed, in_slot = FrameTimeline(), False, [-1, -1]
+        # A 30 fps game dipping below 30 (Dip smoothing): its frames timed as they arrive, on the same
+        # timeline. dipping: the setting is on and DipWatch says the game is dipping now.
+        dip_watch, dipping = DipWatch(), False
         reached: tuple = ()  # timed: the frames whose time came with the frame about to be shown
         audio_next, audio_ms = 0.0, None  # when the sound delay is next looked at, and what chiaki-ng was last told
         replay_next = 0.0  # when instant replay is next told the delay
         rhythm, rhythm_moves, rhythm_note = None, 0, 0.0  # Game frame rate 30 fps: the lock, its moves, next note
         off_since: float | None = None  # since when the game has been off the rate that's needed
         note, toasted = "", set()
+        # Simulate a 30 fps game on a game that's at 30 already: whether the game has been at 60 since Simulate went
+        # on (then a 30 fps stretch is a cutscene, not the game), and since when it has been at about 30
+        test_at_60, at30_since = False, None
+        last_new_at = None  # when the last new frame arrived (Stats.new_gaps_ms)
 
         def test_line() -> str:
             """Test mode's badge, and quality over the last ~30 scored frames (about a second). 90 fps draws frames
@@ -514,8 +548,14 @@ class Pipeline:
                 np.copyto(self._in_np, tick.frame)
                 it.load(self._in_pinned)
             diff = self.detector.update(it.in_u8)
-            # A source that knows better (Remote Play: compressed frame size) overrides the image check.
+            # A source that knows better (the frame tap's flags, test mode) overrides the image check.
             is_new = diff.is_new if tick.new_hint is None else tick.new_hint
+            # Dip smoothing, by the picture's own call (the 30 fps lock below can't see a dip); not in
+            # test mode, which decides what's new itself, nor without a window
+            dip_watch.update(is_new)
+            dipping = (dip_watch.dipping and sink is not None and gt_fn is None and "game_new" not in tick.extra
+                       and settings is not None and getattr(settings, "even_dips", False))
+            seen_new = is_new
             # Game frame rate set to 30 fps: every other tick is new, the checks only choosing which (not in test
             # mode, which decides itself what's new)
             lock30 = (settings is not None and getattr(settings, "game_fps", "auto") == "30"
@@ -526,12 +566,18 @@ class Pipeline:
             if rhythm is not None:
                 is_new = rhythm.update(is_new, tick.extra.get("size"), bool(tick.extra.get("keyframe")),
                                        tick.extra.get("seq"))
+                if dipping:  # its frames timed as they arrived, which the lock's every-other-tick can't follow
+                    is_new = seen_new
                 if rhythm.moves != rhythm_moves:
                     rhythm_moves = rhythm.moves
                     if t0 >= rhythm_note:  # the game stuttered: its frames moved by a tick
                         rhythm_note = t0 + 10.0
                         print(f"[pipeline] 30 fps: the game's frames moved by a tick ({rhythm_moves} so far)")
             seen_rate.add(is_new)
+            if is_new:
+                if last_new_at is not None:
+                    st.new_gaps_ms.append((tick.t_arrival - last_new_at) * 1000)
+                last_new_at = tick.t_arrival
             # In test mode the source's own word on the game's frame (TestMode puts it in extra["game_new"]).
             game_new = tick.extra["game_new"] if "game_new" in tick.extra else is_new
             game_rate.add(game_new)
@@ -614,12 +660,20 @@ class Pipeline:
                 # corruption isn't blended into the generated frame. `|` so the cut detector still sees every frame.
                 is_cut = is_new and (cuts.update(diff.mean_diff, diff.cut) | tick.damaged)
                 action = sched.step(is_new, is_cut)
+                timeline.set_at_arrival(dipping)
                 added = timeline.tick(is_new, is_cut, tick.frame, tick.t_arrival)
                 was_timed = timed
-                timed = (timeline.uneven and sink is not None and gt_fn is None
-                         and (settings is None or getattr(settings, "even_out", True)))
+                timed = dipping or (timeline.uneven and sink is not None and gt_fn is None
+                                    and (settings is None or getattr(settings, "even_out", True)))
                 if timed != was_timed:
-                    if timed:
+                    if timed and dipping:
+                        unshown = None
+                        print("[pipeline] game dipping below 30 fps: timing its frames as they arrived")
+                        if hasattr(sink, "toast") and "dips" not in toasted:
+                            toasted.add("dips")
+                            sink.toast("Game dipping below 30 fps: SmoovPlay is spacing its frames by when they "
+                                       "arrived (Dip smoothing)", 6.0)
+                    elif timed:
                         unshown = None
                         print(f"[pipeline] game at about {timeline.fps()} fps: evening out its frames")
                         if hasattr(sink, "toast") and "even" not in toasted:
@@ -635,9 +689,12 @@ class Pipeline:
                     it.prepare(slot)  # (in_u8 holds this tick's frame)
                     in_slot[slot] = added.id
                 if timed:
-                    st.uneven_ticks += 1
-                    if is_new:
-                        st.uneven_fps.append(timeline.fps())
+                    if dipping:
+                        st.dip_ticks += 1
+                    else:
+                        st.uneven_ticks += 1
+                        if is_new:
+                            st.uneven_fps.append(timeline.fps())
                     quarter_due = False
                     phases = timeline.slots(hz)
                     if len(phases) > 1 and not extra_ok:
@@ -676,6 +733,12 @@ class Pipeline:
                         to_score = (key_frame, key_content)  # scored once the frame is on screen
                 elif action in (Action.PENDING, Action.HOLD):
                     out = key_frame
+                elif rhythm is not None and key_frame is not None:
+                    # Game frame rate 30 fps, and the lock called this tick a repeat. After a game holds a frame for
+                    # a third tick (it dipped below 30), the lock is a tick out of step until its vote moves, and this
+                    # tick carries the game's next frame: shown now, the in-between frame before it would follow on
+                    # the next tick, stepping back. The frame the lock last called new keeps the order, a tick late.
+                    out = key_frame
                 else:
                     out = tick.frame
             prev_key = key_gpu
@@ -696,7 +759,22 @@ class Pipeline:
                 if t_ready >= ov_next:
                     test = settings is not None and settings.simulate_30
                     even = sink is not None and (settings is None or getattr(settings, "even_out", True))
-                    advice = rate_advice(game_rate.fps(), test, even) if enabled or test else ""
+                    game_fps = game_rate.fps()
+                    # Simulate on a game at about 30 fps already plays it at 15 (e.g. started with the launcher's
+                    # "Test with a 60 fps game"): after RATE_TOAST_S it goes off by itself (TestMode follows the
+                    # setting). Not when the game has been at 60 since Simulate went on: a 30 fps cutscene.
+                    test_at_60 = test and (test_at_60 or (game_fps is not None and game_fps >= 50))
+                    at30 = test and not test_at_60 and game_fps is not None and 24 <= game_fps < 38.5
+                    at30_since = None if not at30 else t_ready if at30_since is None else at30_since
+                    if at30 and t_ready - at30_since >= RATE_TOAST_S:
+                        settings.override("simulate_30", False)
+                        test, at30_since = False, None
+                        toasted.add(True)  # its own message instead of the advice
+                        said = SIMULATE_OFF.format(g=round(game_fps))
+                        print(f"[pipeline] {said}")
+                        if hasattr(sink, "toast"):
+                            sink.toast(said, 8.0)
+                    advice = rate_advice(game_fps, test, even) if enabled or test else ""
                     if not advice:
                         off_since, note = None, ""
                     else:

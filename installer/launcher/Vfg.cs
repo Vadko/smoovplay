@@ -3,7 +3,8 @@
 // that licence here; then python -m framegen.vfg_setup downloads NVIDIA's pinned package from NVIDIA's own index into
 // runtime\vfx (Paths.Vfx, passed to every Python process as FRAMEGEN_VFX_PATH).
 // Its output goes to logs\vfg-setup.txt (not *.log, so a diagnostics report still picks the last session's log).
-// NVIDIA's licence also forbids publishing VFG's benchmark results, so nothing here shows or logs its speed.
+// NVIDIA's licence also forbids publishing VFG's benchmark results, so nothing here shows or logs its speed. The same
+// package brings RTX VSR (framegen/rtxvsr.py VfxVsr), under the same licence.
 
 using System;
 using System.Collections.Generic;
@@ -21,7 +22,8 @@ namespace SmoovPlay
     partial class Ui
     {
         Dictionary<string, object> vfgStatus;  // framegen.vfg_setup --status; null until it's read
-        bool vfgLoading, vfgWorking, vfgCancelled;
+        bool vfgLoading, vfgWorking, vfgCancelled, vfgThenDetect;
+        bool detectAfterPlay;  // VFG was set up while playing: Auto-detect runs once play stops (OnPlayState)
         string vfgLine, vfgError;
         Process vfgProc;
         StackPanel vfgBox;  // under the Interpolation model row
@@ -62,6 +64,7 @@ namespace SmoovPlay
                     if (st != null) vfgStatus = st;
                     RefreshSettings();
                     BuildChips();
+                    if (detectResult != null && !detecting) RenderDetect();  // Auto-detect's offer to set it up
                 });
             });
         }
@@ -94,7 +97,7 @@ namespace SmoovPlay
             {
                 bool ours = vfgStatus["ours"] is bool && (bool)vfgStatus["ours"];
                 text = VfgUnsupported.Length > 0 ? "NVIDIA VFG is set up, but this PC can't use it: " + VfgUnsupported
-                     : "NVIDIA VFG is set up" + (ours ? "." : " (" + vfgStatus["path"] + ").");
+                     : "NVIDIA VFG is set up" + (ours ? "" : " (" + vfgStatus["path"] + ")") + ", and with it NVIDIA RTX VSR (Upscaler).";
                 if (ours)
                 {
                     button = "Remove";
@@ -107,7 +110,7 @@ namespace SmoovPlay
                 text = VfgUnsupported + " This PC can't use it, but RIFE 4.22 lite works on every graphics card SmoovPlay supports.";
             else
             {
-                text = "NVIDIA VFG is optional: a separate download from NVIDIA (about " + vfgStatus["size_mb"] + " MB), under NVIDIA's licence.";
+                text = "NVIDIA VFG is optional: a separate download from NVIDIA (about " + vfgStatus["size_mb"] + " MB), under NVIDIA's licence. It also brings NVIDIA RTX VSR (Upscaler).";
                 button = "Set up NVIDIA VFG";
                 click = AskSetUpVfg;
             }
@@ -140,32 +143,38 @@ namespace SmoovPlay
             return d;
         }
 
-        void AskSetUpVfg()
+        void AskSetUpVfg() { AskSetUpVfg(false); }
+
+        /// <summary>thenDetect: asked from Auto-detect's offer (AutoDetect.cs), so Auto-detect runs again once it's set
+        /// up, times it and suggests it if it keeps up.</summary>
+        void AskSetUpVfg(bool thenDetect)
         {
             var licences = VfgLicences();
             Ask("\uE946", "Accent", "Set up NVIDIA VFG",
                 "NVIDIA VFG is NVIDIA's software, not part of SmoovPlay. SmoovPlay downloads it from NVIDIA (about " + vfgStatus["size_mb"]
-                + " MB), and using it means you accept NVIDIA's licence: " + string.Join(", ", licences.Keys) + ". Among other things, it doesn't "
-                + "allow publishing VFG's speed or quality results, so SmoovPlay keeps them out of Copy diagnostics.",
+                + " MB), along with NVIDIA RTX VSR, and using them means you accept NVIDIA's licence: " + string.Join(", ", licences.Keys) + ". Among other things, it doesn't "
+                + "allow publishing their speed or quality results, so SmoovPlay keeps them out of Copy diagnostics.",
                 "Accept and download", "Read the licence", "Cancel", r =>
                 {
-                    if (r == 1) StartVfgInstall();
+                    if (r == 1) StartVfgInstall(thenDetect);
                     else if (r == 2)
                     {
                         foreach (var url in licences.Values) Proc.Open(url);
-                        AskSetUpVfg();  // back to the question once they've read it
+                        AskSetUpVfg(thenDetect);  // back to the question once they've read it
                     }
                 });
         }
 
-        void StartVfgInstall()
+        void StartVfgInstall(bool thenDetect)
         {
             if (vfgWorking) return;
             vfgWorking = true;
+            vfgThenDetect = thenDetect;
             vfgCancelled = false;
             vfgError = null;
             vfgLine = "Starting the download";
             RenderVfg();
+            if (detectResult != null) RenderDetect();  // its offer's button: "Setting up..."
             string log = Path.Combine(paths.Logs, "vfg-setup.txt");
             string tmp = Path.Combine(paths.Runtime, "tmp-vfx");  // pip's download goes on the install drive, not C:\...\Temp
             Task.Run(() =>
@@ -213,9 +222,22 @@ namespace SmoovPlay
                     if (vfgCancelled) vfgError = null;
                     else if (rc == 0)
                     {
-                        // Offered, not switched to: RIFE stays picked until they choose VFG. Not while playing: the
-                        // running session started without VFG.
-                        if (SettingText("model") == "vfg") Toast("NVIDIA VFG is set up", false);
+                        // Offered, not switched to: RIFE stays picked until they choose VFG (or apply Auto-detect's
+                        // suggestion). Not while playing: the running session started without VFG.
+                        // Auto-detect again, which times it: asked for by its offer, or its results on the page are
+                        // out of date now (they say "Not set up"). While playing, once play stops (OnPlayState).
+                        bool redetect = vfgThenDetect || detectResult != null;
+                        if (redetect && !SessionRunning && !detecting)
+                        {
+                            Toast("NVIDIA VFG is set up. Auto-detect is timing it now", false);
+                            RunDetect();
+                        }
+                        else if (redetect && SessionRunning)
+                        {
+                            detectAfterPlay = true;
+                            Toast("NVIDIA VFG is set up. Auto-detect times it once you stop playing", false);
+                        }
+                        else if (SettingText("model") == "vfg") Toast("NVIDIA VFG is set up", false);
                         else if (SessionRunning) Toast("NVIDIA VFG is set up. Pick it under Interpolation model once you stop playing", false);
                         else Toast("NVIDIA VFG is set up. RIFE 4.22 lite stays picked until you switch", false, "Use it now", UseVfgNow);
                     }

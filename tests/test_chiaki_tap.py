@@ -72,12 +72,11 @@ def test_size_detector_60fps_all_new():
     assert all(out[4:])
 
 
-@pytest.mark.xfail(strict=True, reason="known weakness, not fixed yet: the obvious fix (counting those frames) "
-                   "makes a real 60 fps session misread ~3x more new frames as repeats; waiting for a real 30 fps log")
 def test_size_detector_recovers_after_a_still_stretch():
     # A menu or loading screen sends tiny frames; then a 30 fps game resumes. Its new frames are far bigger
-    # than anything in the window, so they're treated like keyframes and left out of it: the window stays full
-    # of repeats and the detector stuck (repeats called new). The stream check reports such runs.
+    # than anything in the window, so they were treated like keyframes and left out of it: the window stayed full
+    # of tiny frames and the detector stuck. Many big frames recently are now the new normal. (Real 30 fps logs,
+    # 17-18 Nov: silent on 55-91% of ticks before, 1-4% after.)
     rng = np.random.default_rng(3)
     d = SizeRepeatDetector()
     for _ in range(180):
@@ -119,3 +118,21 @@ def test_sound_ring_roundtrip_split_and_times():
         assert a.read_new() == [] and a.next is None
     finally:
         a.close()
+
+
+def test_the_patch_asks_chiaki_ng_for_opengl_once_and_only_when_told(tmp_path):
+    # chiaki_tap/apply_patch.py's edit to chiaki-ng's renderer choice (issue 19: Vulkan crashed on a Radeon): the
+    # launcher sets CHIAKI_FRAMETAP_RENDERER=opengl without an NVIDIA card. Applied to the anchor, twice: one edit.
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1] / "chiaki_tap"))
+    import apply_patch as a
+    old, new = a.RENDERER_EDIT
+    f = tmp_path / "qmlmainwindow.cpp"
+    f.write_bytes(("void x()\r\n{\r\n" + old + "            reason = 1;\r\n").replace("\n", "\r\n").replace("\r\r", "\r")
+                  .encode())
+    a.patch_file(f, [a.RENDERER_EDIT], "CHIAKI_FRAMETAP_RENDERER")
+    a.patch_file(f, [a.RENDERER_EDIT], "CHIAKI_FRAMETAP_RENDERER")
+    text = f.read_bytes().decode()
+    assert text.count("CHIAKI_FRAMETAP_RENDERER") == 2 and text.count("CHIAKI_FORCE_VULKAN_FALLBACK") == 1
+    assert "\r\n" in text and "\n" not in text.replace("\r\n", "")  # chiaki-ng's line endings kept
+    assert text.index('== QLatin1String("opengl")') < text.index("CHIAKI_FORCE_VULKAN_FALLBACK")
+    assert "pending_renderer_fallback_reason.clear();" in text  # no dialog

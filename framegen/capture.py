@@ -243,12 +243,25 @@ def _words(name: str) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9]+", name.lower()) if len(w) >= 3 and w not in _GENERIC}
 
 
+# AVerMedia's cards add a sound device named "Not To Use (<card>-Audio)" next to the real one
+_NOT_TO_USE = re.compile(r"\bnot to use\b", re.I)
+
+
+def _card_name(name: str) -> str:
+    """A device's name without a "-Video"/"-Audio" ending, lower case ("Live Gamer Ultra 2.1-Video" -> "live gamer
+    ultra 2.1"), unless only generic words would be left ("USB Video" stays as it is)."""
+    low = name.lower().strip()
+    core = re.sub(r"[\s_-]*(?:video|audio)$", "", low)
+    return core if core != low and _words(core) else low
+
+
 def pick_audio(video: str, devices: list[Device]) -> str | None:
     """The capture card's own sound device: one named like the video device (e.g. "USB3.0 Capture" and "Digital
-    Audio Interface (USB3.0 Capture)", or "Cam Link 4K" for both), else None. A device whose name says nothing (only
-    generic words) matches only on the whole name."""
-    audio = [d.name for d in devices if d.kind == "audio"]
-    v = video.lower().strip()
+    Audio Interface (USB3.0 Capture)", "Cam Link 4K" for both, or "Live Gamer Ultra 2.1-Video" and "HDMI/Line In
+    (Live Gamer Ultra 2.1-Audio)"), else None. A device whose name says nothing (only generic words) matches only on
+    the whole name. AVerMedia's "Not To Use" sound device is never picked."""
+    audio = [d.name for d in devices if d.kind == "audio" and not _NOT_TO_USE.search(d.name)]
+    v = _card_name(video)
     whole = [a for a in audio if v and (v in a.lower() or a.lower() in v)]
     if whole:
         return min(whole, key=len)
@@ -509,8 +522,12 @@ class CardSource:
             try:  # a small sound buffer: DirectShow's default is half a second or more
                 container = av.open(f"video={device}:audio={audio_device}", format="dshow",
                                     options={**opts, "audio_buffer_size": "20"})
-            except Exception as e:  # noqa: BLE001 - busy or gone: the picture on its own
-                print(f"[capture] couldn't open the sound device ({str(e)[:120]}); playing without sound")
+            except Exception as e:  # noqa: BLE001 - busy, gone, or no sound: the picture on its own
+                if audio_device == device:
+                    print(f"[capture] no sound from the card itself ({str(e)[:120]}): playing without sound; pick "
+                          "a sound device in the launcher, or with --capture-audio (see --list-devices)")
+                else:
+                    print(f"[capture] couldn't open the sound device ({str(e)[:120]}); playing without sound")
         if container is None:
             container = _open_card(device, opts)
         return cls(container, f"Capture card ({device})", live=True, range_hint=mode.range, audio=audio, **kw)
@@ -600,6 +617,10 @@ class CardSource:
                     while self._audio_wait and self._audio_wait[0][0] <= now_s:
                         self._play(self._audio_wait.pop(0)[1])
                 tick = Tick(frame, t_arrival, 0, t_source=t_src, t_ready=time.perf_counter())
+                # Numbered as they come off the card, so a frame dropped from the queue below (the PC behind for a
+                # moment) doesn't shift the count: Game frame rate 30 fps takes every other one as new
+                # (cadence.RhythmLock), and a shift by one made it move its beat later, a visible hitch.
+                tick.extra["seq"] = n
                 n += 1
                 if self.test is not None and (tick := self.test(tick)) is None:
                     continue
@@ -691,8 +712,30 @@ class CardSource:
             if self._delay_s is not None:
                 self.player.set_delay(self._delay_s)
         self.player.push(pcm)
+        if (now := time.perf_counter()) >= self._sound_report_t:
+            self._sound_report_t = now + 60.0
+            self._report_sound(final=False)
+
+    def _report_sound(self, final: bool) -> None:
+        """Into the log: how the sound played (framegen.audio.sound_report), once a minute when something went
+        wrong, and for the whole session at the end, so diagnostics say what any clicks were."""
+        stats = getattr(self.player, "stats", None)
+        if stats is None:  # (a stand-in player)
+            return
+        from .audio import sound_report
+        try:
+            now = stats()
+        except Exception:  # noqa: BLE001 - only a log line
+            return
+        line = sound_report(now, None if final else (self._sound_seen or {}))
+        if not final:
+            self._sound_seen = now
+        if line:
+            print(f"[capture] sound{' this session' if final else ', last minute'}: {line}")
 
     _delay_s: float | None = None
+    _sound_report_t = 0.0
+    _sound_seen: dict | None = None
     _rate, _channels = 48000, 2
 
     def read_sound(self) -> list:
@@ -736,6 +779,7 @@ class CardSource:
             pass
         if self.player is not None:
             self.player.close()
+            self._report_sound(final=True)
         print(f"[capture] dropped frames: {self.dropped}")
 
 

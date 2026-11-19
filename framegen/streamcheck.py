@@ -1,7 +1,9 @@
 """Remote Play stream check: how well the size-based repeat check read a real game, in plain words.
 
-The size check (chiaki_tap.SizeRepeatDetector) decides new frame or repeat from compressed size alone. This
-records what it decided next to what the picture check measured, and reports, for one session:
+The size check (chiaki_tap.SizeRepeatDetector) decides new frame or repeat from compressed size alone. The
+pipeline goes by the picture (cadence.DuplicateDetector(learn=True)) since 0.3.4; the size check stays as a second
+opinion, and for test mode. This records what it decided next to what the picture check measured, and reports,
+for one session:
   - the game's frame rate, second by second, and the stream's;
   - the rhythm: a 30 fps game on a 60 Hz stream alternates new / repeat (N r N r ...), so a break is either the
     game itself (a hitch, a frame that came early) or a misread. Each break is tied to what was around it:

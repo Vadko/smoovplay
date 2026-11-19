@@ -16,6 +16,8 @@ from typing import NamedTuple
 import cv2
 import numpy as np
 
+from .fill import Panorama, layout, panorama_t, visible, wider
+
 TICK = 1.0 / 60.0
 
 
@@ -296,6 +298,28 @@ def _host(frame) -> np.ndarray:
 # of everything, so Alt+Tab to another program left the video over it.
 FULLSCREEN_STYLE = os.environ.get("FRAMEGEN_FULLSCREEN_STYLE", "none")
 
+# With Windows' HDR on, OpenGL's own fullscreen (and an OpenGL window over the whole monitor too) switches the display
+# to SDR while the window is in front, and back to HDR when another window is: the picture's colours change with each
+# Alt+Tab or click, and the display's SDR mode can look different again (warmer, say). A DXGI swap chain keeps
+# Windows' HDR on in fullscreen, and Windows shows the SDR picture in it as it shows any SDR window. So when the main
+# display has Windows' HDR on, the window presents through DXGI (8-bit) and fullscreen is a borderless window over the
+# monitor, as with HDR output. FRAMEGEN_KEEP_HDR=0 turns this off (OpenGL's own presentation, as before).
+KEEP_HDR = os.environ.get("FRAMEGEN_KEEP_HDR", "1") != "0"
+KEEP_HDR_REASON = ("With Windows' HDR on, the window always uses the low-delay presentation: the standard one switches "
+                   "the display to SDR in fullscreen, which changes the colours.")
+
+
+def windows_hdr_on() -> bool:
+    """Whether the main display, where fullscreen goes, has Windows' HDR on (False if it can't be told)."""
+    if sys.platform != "win32":
+        return False
+    try:
+        from .dxgi_present import display_hdr
+        d = display_hdr()
+        return bool(d and d["hdr"])
+    except Exception:  # noqa: BLE001 - unknown: OpenGL's own presentation, as before
+        return False
+
 
 def _say_if_slow(what: str, t0: float, limit_ms: float = 250.0) -> None:
     """A line in the log when a window call took far longer than a frame (a stall worth reporting)."""
@@ -380,12 +404,17 @@ HEALTH_COLORS = {"good": (110, 200, 80), "tight": (40, 180, 250), "behind": (70,
 MINI_TEXT = {"main": (245, 245, 245), "dim": (185, 185, 185), "warn": (40, 180, 250)}
 
 
+# Stats overlay size: times the screen's own scale (its height / 1080). Small sits in the edge games keep clear of
+# their HUD (title safe area, about 3-5% of the screen): at 1440p its box is about 24 px tall, 4 px from the edges.
+OVERLAY_SIZES = {"small": 0.8, "medium": 1.0, "large": 1.5}
+
+
 def _mini(t: MiniText, ui: float) -> np.ndarray:
     """The minimal overlay: a small dark box with a dot (green keeping up, amber tight, red falling behind) and a few
     numbers, plus the test line under them while a test runs."""
     font, fs, th = cv2.FONT_HERSHEY_SIMPLEX, 0.52 * ui, 1 if ui < 1.6 else 2
     small = 0.42 * ui
-    pad, gap, r = int(9 * ui), int(12 * ui), max(3, int(5 * ui))
+    pad, gap, r = max(3, int(6 * ui)), int(10 * ui), max(3, int(4.5 * ui))
     th_main = cv2.getTextSize("90", font, fs, th)[0][1]
     widths = [cv2.getTextSize(x, font, fs, th)[0][0] for x, _ in t.parts]
     line_w = 2 * r + gap + sum(widths) + gap * max(0, len(widths) - 1)
@@ -401,6 +430,21 @@ def _mini(t: MiniText, ui: float) -> np.ndarray:
         x += tw + gap
     if t.second:
         cv2.putText(img, t.second, (pad, base + int(8 * ui) + second_h), font, small, MINI_TEXT["dim"], 1, cv2.LINE_AA)
+    return img
+
+
+def _detail(text: str, ui: float, min_w: int = 0) -> np.ndarray:
+    """The detailed overlay: its line (and a second, the advice or a test line) on a small dark box like the minimal
+    one's, at the same text size. min_w: the box only grows, so it doesn't jitter as the numbers change width."""
+    font, fs, th = cv2.FONT_HERSHEY_SIMPLEX, 0.52 * ui, 1 if ui < 1.6 else 2
+    pad, lead = max(3, int(6 * ui)), int(8 * ui)
+    lines = text.split("\n")[:2]
+    line_h = cv2.getTextSize("90", font, fs, th)[0][1]
+    w = max(min_w, 2 * pad + max(cv2.getTextSize(x, font, fs, th)[0][0] for x in lines))
+    img = np.full((2 * pad + len(lines) * line_h + (len(lines) - 1) * lead, w, 3), (30, 27, 25), np.uint8)
+    for i, line in enumerate(lines):
+        cv2.putText(img, line, (pad, pad + line_h + i * (line_h + lead)), font, fs,
+                    MINI_TEXT["main" if i == 0 else "dim"], th, cv2.LINE_AA)
     return img
 
 
@@ -426,10 +470,10 @@ class GLWindowSink:
     Display settings come from `settings` (framegen.settings) and apply live; see SPECS there for what each
     does. vsync off presents immediately (lowest latency, may tear); on a G-Sync/FreeSync display vsync on lets
     VRR follow our frame timing instead of tearing. When the window is bigger than the frame it upscales: "fsr"
-    with AMD FSR 1 (~0.1 ms GPU at 1440p), "vsr" with NVIDIA RTX Video Super Resolution (needs the RTX Video SDK,
-    see framegen/rtxvsr.py, and frames on the GPU), "bilinear" with a plain filtered blit. A look (framegen/looks.py,
-    drawn by framegen/looks_gl.py) goes on after that, at the window's size.
-    Keys: m/Tab = settings menu (arrows + Enter in it), i = interpolation on/off for this session, s = stats
+    with AMD FSR 1 (~0.1 ms GPU at 1440p), "vsr" with NVIDIA RTX Video Super Resolution (needs NVIDIA's package
+    or the RTX Video SDK, see framegen/rtxvsr.py, and frames on the GPU), "bilinear" with a plain filtered blit. A
+    look (framegen/looks.py, drawn by framegen/looks_gl.py) goes on after that, at the window's size.
+    Keys: m/Tab = settings menu (arrows + Enter in it, Esc back a page), i = interpolation on/off for this session, s = stats
     overlay (off, minimal, detailed), f = fullscreen, u = next upscaler, k = look on/off, j = next look (Shift+J:
     the one before), l = delay test (PS5 Remote Play), r = save the instant replay, b = save a before & after video
     of it (framegen/replay.py), q/Esc = quit.
@@ -444,6 +488,10 @@ class GLWindowSink:
     borderless window over the monitor. Looks and RTX VSR are off. If that swap chain can't be made (no HDR display,
     no NVIDIA interop), self.hdr10 is False and the window is the usual SDR one: the caller then sends SDR frames.
 
+    With Windows' HDR on for the main display (KEEP_HDR), an SDR picture also goes through DXGI, an 8-bit swap chain,
+    whatever "present" says, and fullscreen is a borderless window over the monitor: OpenGL's own fullscreen would
+    switch the display to SDR while it's in front (self.keep_hdr; the "present" row says why it can't be changed).
+
     overlay_of (window capture, framegen/window.py): () -> (the app's picture area, its monitor) in screen pixels, or
     None while it's minimised. The window then sits over the app's picture (fullscreen: over its monitor), clicks
     and keys go through to the app, it never takes the focus, and it's left out of the capture. Settings change on
@@ -454,10 +502,11 @@ class GLWindowSink:
 
     # Shown when the window opens, and again when the mouse moves over it.
     KEYS_HINT = "M: menu    F: fullscreen    Esc: quit"
+    fill, panorama = "fit", None  # Fill the screen (set from the settings in __init__)
 
     def __init__(self, w: int, h: int, settings=None, restart_reasons=None, choices: dict | None = None,
                  unavailable: dict | None = None, overlay_of=None, hdr: bool = False, hdr_peak: float = 1000.0,
-                 window_keys: dict | None = None) -> None:
+                 window_keys: dict | None = None, clean_source: bool = False) -> None:
         import glfw
         from OpenGL import GL
 
@@ -469,25 +518,12 @@ class GLWindowSink:
         self.glfw, self.GL, self.w, self.h = glfw, GL, w, h
         if not glfw.init():
             raise RuntimeError("glfw init failed")
-        self.dx = None  # a DxgiPresenter when the window presents through DXGI (settings "present")
+        self.dx = None  # a DxgiPresenter when the window presents through DXGI (_choose_presentation)
         self.overlay_of = overlay_of
         self.hdr10 = False  # presenting HDR10 (hdr asked for, and the swap chain could be made)
+        self.keep_hdr = False  # presenting SDR through DXGI because Windows' HDR is on (KEEP_HDR)
         self.fs_style = FULLSCREEN_STYLE
-        if hdr and overlay_of is None:
-            self._open_dxgi(w, h, hdr=True, peak=hdr_peak)
-            self.hdr10 = self.dx is not None
-            if self.hdr10:
-                # Fullscreen with this swap chain is a borderless window: GLFW's fullscreen could stall it.
-                self.fs_style = "borderless" if FULLSCREEN_STYLE == "none" else FULLSCREEN_STYLE
-        if self.dx is not None or st.present != "dxgi":
-            pass  # (HDR output's swap chain, or the standard presentation)
-        elif overlay_of is not None:
-            print("[display] window capture: standard presentation (the overlay draws with OpenGL)")
-        elif not st.fullscreen or FULLSCREEN_STYLE != "none":
-            self._open_dxgi(w, h)
-        else:
-            print("[display] fullscreen: standard presentation (Low delay is for windowed play; fullscreen already "
-                  "skips the compositor)")
+        self._choose_presentation(w, h, hdr, hdr_peak)
         if self.dx is None:
             if overlay_of is not None:  # borderless, on top, click-through, and not focused when it opens
                 for hint, value in ((glfw.DECORATED, glfw.FALSE), (glfw.FLOATING, glfw.TRUE),
@@ -503,6 +539,7 @@ class GLWindowSink:
         glfw.set_window_attrib(self.win, glfw.AUTO_ICONIFY, glfw.FALSE)
         self._set_icon(glfw)
         self.overlay, self.cmd, self.windowed_pos, self.remote = st.overlay, None, None, None
+        self.fill, self.panorama = st.fill, None  # Fill the screen (framegen/fill.py); Panorama's pass once used
         self._borderless = False  # fullscreen as a borderless window (_set_borderless)
         glfw.set_key_callback(self.win, self._on_key)
         glfw.set_cursor_pos_callback(self.win, self._on_mouse)
@@ -535,19 +572,6 @@ class GLWindowSink:
         GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, self.fbo)
         GL.glFramebufferTexture2D(GL.GL_READ_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D, self.tex, 0)
 
-        # Stats text: a small strip of its own, blitted over the frame (no full-frame copy to draw on). Room for two
-        # lines (the second is the test-mode line); _ov_th is the height the current text uses.
-        self.ov_w, self.ov_h, self._ov_text, self._ov_tw, self._ov_th = 1600, 96, None, 0, 56
-        self.ov_tex = GL.glGenTextures(1)
-        GL.glBindTexture(GL.GL_TEXTURE_2D, self.ov_tex)
-        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
-        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
-        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGBA16 if self.hdr10 else GL.GL_RGBA8, self.ov_w, self.ov_h, 0,
-                        GL.GL_BGR, GL.GL_UNSIGNED_SHORT if self.hdr10 else GL.GL_UNSIGNED_BYTE, None)
-        self.ov_fbo = GL.glGenFramebuffers(1)
-        GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, self.ov_fbo)
-        GL.glFramebufferTexture2D(GL.GL_READ_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D, self.ov_tex, 0)
-
         # Frames that are already on the GPU (CUDA tensors) are copied into the texture directly.
         self.interop = None
         renderer = GL.glGetString(GL.GL_RENDERER).decode(errors="replace")
@@ -567,19 +591,19 @@ class GLWindowSink:
             print(f"[display] FSR 1 unavailable ({str(e)[:200]})")
         self.vsr_why = ("it isn't used with HDR output yet" if self.hdr10 else
                         "it needs frames decoded on the GPU (the default for PS5 Remote Play)")
+        self._vsr_args = None  # (w, h, clean) while RTX VSR can run but isn't made yet (_vsr_ready)
         if self.gpu and not self.hdr10:  # RTX VSR works on frames that are already CUDA tensors (8-bit ones)
-            from .rtxvsr import RtxVsr, unavailable_reason
+            from .rtxvsr import unavailable_reason
             why = unavailable_reason()
             if why is None:
-                try:
-                    self.vsr = RtxVsr(w, h, vsr_quality)
-                except Exception as e:  # noqa: BLE001 - VSR is optional
-                    why = str(e)[:200]
+                self._vsr_args = (w, h, clean_source)
             self.vsr_why = why
-            if self.vsr is None and scaler == "vsr":
+            if why is not None and scaler == "vsr":
                 print(f"[display] RTX VSR unavailable ({why})")
-        self.modes = [m for m, ok in (("fsr", self.fsr), ("vsr", self.vsr), ("bilinear", True)) if ok]
+        self.modes = [m for m, ok in (("fsr", self.fsr), ("vsr", self._vsr_args), ("bilinear", True)) if ok]
         self.mode = scaler if scaler in self.modes else self.modes[0]
+        if self.mode == "vsr" and not self._vsr_ready():
+            self.mode = self.modes[0]
         details = {"fsr": f" (sharpness {sharpness:g})", "vsr": f" (quality {vsr_quality})", "bilinear": ""}
         print(f"[display] upscaling with {self._name(self.mode)}{details[self.mode]}; u cycles "
               + " / ".join(self._name(m) for m in self.modes) + "; m opens the settings menu")
@@ -602,9 +626,11 @@ class GLWindowSink:
         self._bake_said = False
 
         self.choices, self.unavailable = dict(choices or {}), dict(unavailable or {})
+        self.note_presentation()
         self.menu = Menu(st, allowed=self.allowed, disabled=self.disabled, restart_reasons=restart_reasons)
         self.menu_panel, self.toast_panel = _Panel(GL, self.hdr10), _Panel(GL, self.hdr10)
-        self.mini_panel, self._mini_state = _Panel(GL, self.hdr10), None
+        self.mini_panel, self._mini_state = _Panel(GL, self.hdr10), None  # the stats overlay, Minimal or Detailed
+        self._detail_w, self._detail_ui = 0, None  # the detailed box's width so far, at this size (it only grows)
         self._menu_top = None  # (GL y of the menu's top, the picture's (y0, height) it was placed in) while it's open
         self._menu_state = self._toast_state = None
         self._toast_text, self._toast_until = "M: menu    F: fullscreen    Esc: quit", time.perf_counter() + 8.0
@@ -721,7 +747,30 @@ class GLWindowSink:
             self.toast(self.KEYS_HINT, 3.0 if self.hotkeys is None else 6.0)
 
     def _name(self, mode: str) -> str:
-        return f"RTX VSR q{self.vsr.quality}" if mode == "vsr" else self.NAMES[mode]
+        if mode == "vsr":
+            return f"RTX VSR q{self.vsr.quality if self.vsr is not None else self.settings.vsr_quality}"
+        return self.NAMES[mode]
+
+    def _vsr_ready(self) -> bool:
+        """Make RTX VSR the first time it's picked, so a session that never uses it loads nothing for it (NVIDIA's
+        model and its graphics memory). If it can't start, it comes off the list (False)."""
+        if self.vsr is not None:
+            return True
+        if self._vsr_args is None:
+            return False
+        from .rtxvsr import make_vsr
+        w, h, clean = self._vsr_args
+        try:
+            self.vsr = make_vsr(w, h, self.settings.vsr_quality, clean=clean)
+        except Exception as e:  # noqa: BLE001 - VSR is optional
+            self.vsr_why, self._vsr_args = str(e)[:200], None
+            if "vsr" in self.modes:
+                self.modes.remove("vsr")
+            print(f"[display] RTX VSR unavailable ({self.vsr_why})")
+            return False
+        print(f"[display] RTX VSR {self.vsr.how}"
+              + (": NVIDIA's models for clean video (a capture card's raw frames)" if clean else ""))
+        return True
 
     # ---- presentation ----------------------------------------------------------
     def _set_icon(self, glfw) -> None:
@@ -729,9 +778,11 @@ class GLWindowSink:
         full logo at 48 and 64 (framegen/assets, from docs/brand). A missing icon never stops a session."""
         try:
             from pathlib import Path
+
+            from .imagefile import read_image
             images = []
             for n in (16, 24, 32, 48, 64):
-                bgra = cv2.imread(str(Path(__file__).with_name("assets") / f"icon_{n}.png"), cv2.IMREAD_UNCHANGED)
+                bgra = read_image(Path(__file__).with_name("assets") / f"icon_{n}.png", cv2.IMREAD_UNCHANGED)
                 if bgra is not None and bgra.shape == (n, n, 4):
                     images.append((n, n, bgra[..., [2, 1, 0, 3]]))
             if images:
@@ -739,11 +790,47 @@ class GLWindowSink:
         except Exception as e:
             print(f"[display] window icon not set: {e}")
 
-    def _open_dxgi(self, w: int, h: int, hdr: bool = False, peak: float = 1000.0) -> None:
+    def _choose_presentation(self, w: int, h: int, hdr: bool, hdr_peak: float) -> None:
+        """How frames reach the screen: self.dx, a DXGI swap chain, or None for OpenGL's own; and how fullscreen is
+        done (self.fs_style). DXGI for HDR output (hdr), when the main display has Windows' HDR on (KEEP_HDR), and for
+        settings "present" = Low delay in a window. Window capture's overlay always draws with OpenGL."""
+        st = self.settings
+        if self.overlay_of is None:
+            hdr_on = KEEP_HDR and windows_hdr_on()
+            if hdr:
+                self._open_dxgi(w, h, hdr=True, peak=hdr_peak)
+                self.hdr10 = self.dx is not None
+            if self.dx is None and hdr_on:  # (also when HDR output's 10-bit swap chain couldn't be made: SDR, then)
+                self._open_dxgi(w, h, keep_hdr=True)
+                self.keep_hdr = self.dx is not None
+            if self.dx is not None:
+                # Fullscreen with this swap chain is a borderless window: GLFW's fullscreen could stall it.
+                self.fs_style = "borderless" if FULLSCREEN_STYLE == "none" else FULLSCREEN_STYLE
+                return
+            if hdr_on:
+                return  # (it said why; Low delay would fail the same way)
+        if st.present != "dxgi":
+            return  # the standard presentation
+        if self.overlay_of is not None:
+            print("[display] window capture: standard presentation (the overlay draws with OpenGL)")
+        elif not st.fullscreen or FULLSCREEN_STYLE != "none":
+            self._open_dxgi(w, h)
+        else:
+            print("[display] fullscreen: standard presentation (Low delay is for windowed play; fullscreen already "
+                  "skips the compositor)")
+
+    def note_presentation(self) -> None:
+        """The "present" row can't be changed while Windows' HDR keeps the window on DXGI (it overrides HDR output's
+        reason: keep_hdr is HDR output's fallback too). run.py puts it back if it drops HDR output's rows."""
+        if self.keep_hdr:
+            self.unavailable["present"] = KEEP_HDR_REASON
+
+    def _open_dxgi(self, w: int, h: int, hdr: bool = False, peak: float = 1000.0, keep_hdr: bool = False) -> None:
         """Settings "present" = "dxgi" (Experimental): the video window gets a DXGI flip-model swap chain and no OpenGL
         context of its own (GLFW NO_API); OpenGL draws on a hidden window (framegen/dxgi_present.py). In a window that
         skips the compositor's copy: less delay, and G-Sync/FreeSync work. Leaves self.dx None (and no windows) if
-        any of it fails, so the caller opens the usual OpenGL window. hdr: a 10-bit HDR10 swap chain (HDR output)."""
+        any of it fails, so the caller opens the usual OpenGL window. hdr: a 10-bit HDR10 swap chain (HDR output).
+        keep_hdr: an 8-bit one because Windows' HDR is on (KEEP_HDR); only what's logged differs."""
         glfw = self.glfw
         from .dxgi_present import DxgiPresenter
         win = glwin = None
@@ -766,7 +853,10 @@ class GLWindowSink:
             test = ("copy", 2) != (self.dx.mode, BUFFERS) or FULLSCREEN_STYLE != "none"
             print("[display] window presentation: DXGI flip model"
                   + (", HDR10 (10-bit, PQ, BT.2020)" if hdr else "")
-                  + (", tearing allowed with VSync off" if self.dx.tearing else "") + " (Experimental)"
+                  + ((", tearing allowed with VSync off" + (" in fullscreen" if keep_hdr else "")) if self.dx.tearing
+                     else "")
+                  + (", as Windows' HDR is on: fullscreen keeps it on (FRAMEGEN_KEEP_HDR=0: OpenGL's own)" if keep_hdr
+                     else "") + " (Experimental)"
                   + (f" [testing: {self.dx.mode}, {BUFFERS} buffers, fullscreen {FULLSCREEN_STYLE}]" if test else ""))
         except Exception as e:  # noqa: BLE001 - any failure: OpenGL's own presentation
             glfw.default_window_hints()
@@ -777,6 +867,10 @@ class GLWindowSink:
             self.dx = None
             if hdr:
                 print(f"[display] HDR output unavailable ({str(e)[:200]}); showing HDR in SDR")
+            elif keep_hdr:
+                print(f"[display] Windows' HDR is on, but DXGI presentation is unavailable ({str(e)[:200]}); using "
+                      "OpenGL's own. Fullscreen then switches the display to SDR while it's in front, which can change "
+                      "the colours; a window keeps HDR on")
             else:
                 print(f"[display] low-delay window presentation unavailable ({str(e)[:200]}); using OpenGL's own")
 
@@ -784,12 +878,17 @@ class GLWindowSink:
         """The framebuffer the picture is drawn into: the window's own, or DXGI's offscreen one."""
         return self.dx.fbo if self.dx is not None else 0
 
+    def _may_tear(self) -> bool:
+        """Whether VSync off may tear. Fullscreen, and a window with Low delay picked, as before. Not a window that's
+        on DXGI only because Windows' HDR is on (KEEP_HDR): with the standard presentation it never tore."""
+        return not self.keep_hdr or self._borderless or self.settings.present == "dxgi"
+
     def _present(self) -> None:
         if self.dx is not None:
             if self.glfw.get_window_attrib(self.win, self.glfw.ICONIFIED):
                 return  # minimised: nothing to show, and a flip-model Present can wait for a window nobody sees
             t0 = time.perf_counter()
-            self.dx.present(self.settings.vsync)
+            self.dx.present(self.settings.vsync, tear=self._may_tear())
             _say_if_slow("DXGI Present", t0)
         else:
             self.glfw.swap_buffers(self.win)
@@ -801,7 +900,7 @@ class GLWindowSink:
         return value in self.choices.get(key, (value,))
 
     def disabled(self, key: str) -> str | None:
-        if key == "vsr_quality" and self.vsr is None:
+        if key == "vsr_quality" and self.vsr is None and self._vsr_args is None:
             return f"RTX VSR isn't available: {self.vsr_why}."
         if key == "fsr_sharpness" and self.fsr is None:
             return "FSR 1 couldn't start on this GPU."
@@ -811,18 +910,33 @@ class GLWindowSink:
         """A setting changed (menu, hotkey or elsewhere): apply the ones the window owns."""
         st, glfw = self.settings, self.glfw
         if key == "scaler" and st.scaler in self.modes:
-            self.mode = st.scaler
+            if st.scaler != "vsr" or self._vsr_ready():
+                self.mode = st.scaler
+            else:
+                self.toast(f"RTX VSR couldn't start: {self.vsr_why}", 5.0)
         elif key == "fsr_sharpness" and self.fsr is not None:
             self.fsr.sharpness = st.fsr_sharpness
         elif key == "vsr_quality" and self.vsr is not None:
             self.vsr.quality = st.vsr_quality
         elif key == "overlay":
             self.overlay = st.overlay
+        elif key == "fill":
+            self.fill = st.fill
+            if not self.menu.open:  # a hotkey: say what it did, and that it's the same picture
+                from .settings import BY_KEY
+                self.toast(f"Fill the screen: {BY_KEY['fill'].name(st.fill)}"
+                           + ("" if st.fill == "fit" else "\nThe same 16:9 picture: consoles send 16:9 only"), 3.0)
+            return
         elif key == "fullscreen":
             if self.dx is not None and st.fullscreen and self.fs_style == "none":
                 self.toast("Fullscreen starts next time you press Play: Low delay works in a window only", 5.0)
                 return
             self._set_fullscreen(st.fullscreen)
+            if (st.fullscreen and self.dx is None and self.overlay_of is None and KEEP_HDR and windows_hdr_on()):
+                # Windows' HDR was turned on after the window opened (with OpenGL's own presentation)
+                self.toast("Windows' HDR is on now: fullscreen switches the display to SDR until you press Play again",
+                           6.0)
+                return
         elif key == "vsync":
             glfw.swap_interval(1 if st.vsync else 0)
         elif key in ("look", "look_on"):
@@ -970,7 +1084,7 @@ class GLWindowSink:
         self._toast_text, self._toast_until = text, time.perf_counter() + seconds
 
     _NAV = {"UP": "up", "DOWN": "down", "LEFT": "left", "RIGHT": "right", "ENTER": "enter", "KP_ENTER": "enter",
-            "BACKSPACE": "back"}
+            "BACKSPACE": "back", "ESCAPE": "back"}  # Esc: back a page, and on the main page it closes the menu
 
     def _on_key(self, win, key, scancode, action, mods) -> None:
         glfw, st = self.glfw, self.settings
@@ -991,8 +1105,6 @@ class GLWindowSink:
         if key in (glfw.KEY_M, glfw.KEY_TAB):
             self.menu.open = not self.menu.open
             self._toast_until = 0.0
-        elif key == glfw.KEY_ESCAPE and self.menu.open:
-            self.menu.open = False
         elif key in (glfw.KEY_Q, glfw.KEY_ESCAPE):
             self.cmd = "quit"
         elif key == glfw.KEY_I:
@@ -1007,6 +1119,8 @@ class GLWindowSink:
                 st.set("overlay", False)
         elif key == glfw.KEY_U:
             st.step("scaler", 1, self.allowed)
+        elif key == glfw.KEY_Z:
+            st.step("fill", 1, self.allowed)
         elif key == glfw.KEY_K:
             self.looks.toggle()
         elif key == glfw.KEY_J:
@@ -1028,8 +1142,15 @@ class GLWindowSink:
         s = min(fw / self.w, fh / self.h)  # letterbox, keep aspect
         if self.overlay_of is not None:  # window capture: the frame is the app's window squeezed to the stream's
             return fw, fh, s, fw, fh, 0, 0  # size, so it's stretched back over it to fill the overlay exactly
-        dw, dh = int(self.w * s), int(self.h * s)
-        return fw, fh, s, dw, dh, (fw - dw) // 2, (fh - dh) // 2
+        dw, dh, x0, y0 = layout(self.fill, fw, fh, self.w, self.h)  # (Fill the screen: always the same 16:9 picture)
+        return fw, fh, s, dw, dh, x0, y0
+
+    def _panorama_on(self, fw: int, fh: int) -> bool:
+        return self.fill == "panorama" and self.overlay_of is None and wider(fw, fh, self.w, self.h)
+
+    def _ui_rect(self, fw: int, fh: int, dw: int, dh: int, x0: int, y0: int) -> tuple[int, int, int, int]:
+        """Where the menu, messages and stats go: the picture as seen on the screen."""
+        return (0, 0, fw, fh) if self._panorama_on(fw, fh) else visible(dw, dh, x0, y0, fw, fh)
 
     def _draw_ui(self, x0: int, y0: int, dw: int, dh: int) -> None:
         """Menu and messages, on top of everything else. Images are redrawn only when they change."""
@@ -1056,7 +1177,10 @@ class GLWindowSink:
                 self._toast_state = state
             p = self.toast_panel
             m = int(16 * ui)
-            p.blit(x0 + dw - p.w - m, y0 + dh - m)
+            below = 0  # the stats overlay in the top right: messages go under it
+            if self.overlay and getattr(self.settings, "overlay_corner", "") == "top_right" and self._mini_state:
+                below = self.mini_panel.h + max(2, int(4 * self._stats_ui(dh)))
+            p.blit(x0 + dw - p.w - m, y0 + dh - m - below)
 
     def busy(self, fn, text: str):
         """Run fn() on a worker thread while the window stays responsive, showing the last frame and `text`.
@@ -1084,7 +1208,7 @@ class GLWindowSink:
                                  GL.GL_LINEAR)
             dots = "." * (1 + int(time.perf_counter() - t0) % 3)
             self.toast(f"{text}{dots:<3}", 1.0)
-            self._draw_ui(x0, y0, dw, dh)
+            self._draw_ui(*visible(dw, dh, x0, y0, fw, fh))
             self._present()
             self._events()
             if self.remote is not None and self.remote.poll() == "quit":  # live settings still apply; a
@@ -1112,7 +1236,7 @@ class GLWindowSink:
             GL.glClear(GL.GL_COLOR_BUFFER_BIT)
             GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, self.fbo)  # the last frame, plain (no upscaler or look)
             GL.glBlitFramebuffer(0, 0, self.w, self.h, x0, y0 + dh, x0 + dw, y0, GL.GL_COLOR_BUFFER_BIT, GL.GL_LINEAR)
-            self._draw_ui(x0, y0, dw, dh)
+            self._draw_ui(*visible(dw, dh, x0, y0, fw, fh))
             self._present()
         self.settle()
         self._events()
@@ -1143,9 +1267,16 @@ class GLWindowSink:
             GL.glTexSubImage2D(GL.GL_TEXTURE_2D, 0, 0, 0, self.w, self.h, GL.GL_BGR,
                                GL.GL_HALF_FLOAT if host.dtype == np.float16 else GL.GL_UNSIGNED_BYTE, host)
         fw, fh, s, dw, dh, x0, y0 = self._layout()
-        target = self._target()
+        target = screen = self._target()
         GL.glBindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, target)
         GL.glClear(GL.GL_COLOR_BUFFER_BIT)
+        ux, uy, uw, uh = self._ui_rect(fw, fh, dw, dh, x0, y0)
+        pano = self._panorama_on(fw, fh)
+        if pano:  # Panorama: the picture is drawn as for Fit (to the screen's height) into its texture, then bent
+            if self.panorama is None:  # across the whole screen below
+                self.panorama = Panorama(GL)
+            target, x0, y0 = self.panorama.target(dw, dh), 0, 0
+            GL.glBindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, target)
         upscale = dw > self.w or dh > self.h
         mode = self.mode
         if mode == "vsr" and not on_gpu:  # a CPU frame: VSR needs it on the GPU
@@ -1176,13 +1307,16 @@ class GLWindowSink:
             # Image row 0 is the top; GL row 0 is the bottom, so blit with destination Y flipped.
             GL.glBlitFramebuffer(0, 0, self.w, self.h, x0, y0 + dh, x0 + dw, y0, GL.GL_COLOR_BUFFER_BIT,
                                  GL.GL_LINEAR)
+        if pano:
+            self.panorama.draw(screen, fw, fh, panorama_t(fw, fh, self.w, self.h))
+            label += " + panorama"
         self.timer.end(q, f"{label} {dw}x{dh}")
         if self.overlay and isinstance(text, MiniText):
-            self._draw_mini(text, x0, y0, dh)
+            self._draw_stats(text, ux, uy, uw, uh)
         elif self.overlay and text:
             first, nl, rest = text.partition("\n")  # the upscaler goes on the first line; a second is the test line
-            self._blit_text(f"{first}  {label}{nl}{rest}", x0, y0 + dh, s)
-        self._draw_ui(x0, y0, dw, dh)
+            self._draw_stats(f"{first}  {label}{nl}{rest}", ux, uy, uw, uh)
+        self._draw_ui(ux, uy, uw, uh)
         self._present()
         self.settle()
         self._events()
@@ -1204,7 +1338,7 @@ class GLWindowSink:
 
     def _vsr_render(self, dw: int, dh: int) -> tuple[int, int]:
         """RTX VSR into the window-sized texture (row 0 = the image's top); returns (texture, framebuffer)."""
-        if self.vsr_out is None or self.vsr_out[3:] != (dw, dh):
+        if self.vsr_out is None or self.vsr_out[3:5] != (dw, dh):
             self._vsr_target(dw, dh)
         tex, fbo, img = self.vsr_out[:3]
         stream = self.vsr.stream.cuda_stream
@@ -1216,20 +1350,30 @@ class GLWindowSink:
         return tex, fbo
 
     def _vsr_target(self, w: int, h: int) -> None:
-        """(Re)make the VSR output texture at the window's image size."""
+        """(Re)make the VSR output texture at the window's image size. RGBA8, or, for NVIDIA's package's packed
+        10-bit output, an R32UI texture that CUDA copies the words into, read by GL through an RGB10_A2 view of the
+        same memory (both 32 bits a pixel, R in the low bits as NVIDIA packs it), so nothing unpacks them."""
         from .glcuda import CudaGLImage
 
         GL = self.GL
         self._vsr_target_free()
-        tex = GL.glGenTextures(1)
-        GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
+        store = GL.glGenTextures(1)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, store)
+        if self.vsr.out_format == "rgb10a2":
+            GL.glTexStorage2D(GL.GL_TEXTURE_2D, 1, GL.GL_R32UI, w, h)
+            tex = GL.glGenTextures(1)
+            GL.glTextureView(tex, GL.GL_TEXTURE_2D, store, GL.GL_RGB10_A2, 0, 1, 0, 1)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_SWIZZLE_A, GL.GL_ONE)  # NVIDIA leaves alpha 0 at times
+        else:
+            GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGBA8, w, h, 0, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, None)
+            tex = store
         GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST)
         GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_NEAREST)
-        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGBA8, w, h, 0, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, None)
         fbo = GL.glGenFramebuffers(1)
         GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, fbo)
         GL.glFramebufferTexture2D(GL.GL_READ_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D, tex, 0)
-        self.vsr_out = (tex, fbo, CudaGLImage(int(tex)), w, h)
+        self.vsr_out = (tex, fbo, CudaGLImage(int(store)), w, h, store)
 
     def _vsr_target_free(self) -> None:
         if self.vsr_out is not None:
@@ -1238,38 +1382,35 @@ class GLWindowSink:
                 self.vsr.forget(img.array)
             img.close()
             self.GL.glDeleteFramebuffers(1, [fbo])
-            self.GL.glDeleteTextures([tex])
+            self.GL.glDeleteTextures(sorted({int(tex), int(self.vsr_out[5])}))  # a view and its storage, or one
             self.vsr_out = None
 
-    def _draw_mini(self, text: MiniText, x0: int, y0: int, dh: int) -> None:
-        """The minimal overlay in the top-left corner, at the screen's own size (drawn again only when it changes)."""
-        ui = max(0.5, dh / 1080)
-        state = (str(text), text.parts, text.health, round(ui, 3))
-        if state != self._mini_state:
-            self.mini_panel.update(_mini(text, ui))
-            self._mini_state = state
-        m = int(12 * ui)
-        self.mini_panel.blit(x0 + m, y0 + dh - m)
+    def _stats_ui(self, dh: int) -> float:
+        """The stats overlay's scale: the screen's own (its height / 1080) times Stats overlay size."""
+        k = OVERLAY_SIZES.get(getattr(self.settings, "overlay_size", "small"), OVERLAY_SIZES["small"])
+        return max(0.6, max(0.5, dh / 1080) * k)
 
-    def _blit_text(self, text: str, x0: int, top: int, s: float) -> None:
-        GL = self.GL
-        if text != self._ov_text:
-            img = np.zeros((self.ov_h, self.ov_w, 3), np.uint8)
-            lines = text.split("\n")[:2]
-            for i, line in enumerate(lines):
-                cv2.putText(img, line, (12, 38 + 40 * i), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA)
-            # The box only grows, so it doesn't jitter as the numbers change width.
-            tw = max(cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)[0][0] for line in lines) + 24
-            self._ov_tw = min(self.ov_w, max(self._ov_tw, tw))
-            self._ov_th = 16 + 40 * len(lines)
-            GL.glBindTexture(GL.GL_TEXTURE_2D, self.ov_tex)
-            img, _, kind = _gl_image(GL, img, self.hdr10)
-            GL.glTexSubImage2D(GL.GL_TEXTURE_2D, 0, 0, 0, self.ov_w, self.ov_h, GL.GL_BGR, kind, img)
-            self._ov_text = text
-        GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, self.ov_fbo)
-        x, y = x0 + int(8 * s), top - int(8 * s)
-        GL.glBlitFramebuffer(0, 0, self._ov_tw, self._ov_th, x, y, x + int(self._ov_tw * s), y - int(self._ov_th * s),
-                             GL.GL_COLOR_BUFFER_BIT, GL.GL_LINEAR)
+    def _draw_stats(self, text: str, x0: int, y0: int, dw: int, dh: int) -> None:
+        """The stats overlay (Minimal, a MiniText, or Detailed, a str) in the corner picked (Stats overlay position),
+        tucked into its edges, out of the way of the game's HUD. Drawn again only when it changes."""
+        ui = self._stats_ui(dh)
+        if isinstance(text, MiniText):
+            state = ("mini", str(text), text.parts, text.health, round(ui, 3))
+            if state != self._mini_state:
+                self.mini_panel.update(_mini(text, ui))
+        else:
+            state = ("detail", text, round(ui, 3))
+            if state != self._mini_state:
+                if self._detail_ui != round(ui, 3):
+                    self._detail_w, self._detail_ui = 0, round(ui, 3)
+                img = _detail(text, ui, self._detail_w)
+                self._detail_w = img.shape[1]
+                self.mini_panel.update(img)
+        self._mini_state = state
+        p, m = self.mini_panel, max(2, int(4 * ui))
+        corner = getattr(self.settings, "overlay_corner", "top_left")
+        x = x0 + dw - p.w - m if corner.endswith("right") else x0 + m
+        p.blit(x, y0 + p.h + m if corner.startswith("bottom") else y0 + dh - m)
 
     # ---- looks
     def remote_commands(self) -> dict:
@@ -1336,9 +1477,11 @@ class GLWindowSink:
             self.hotkeys = None
         self.GL.glFinish()
         self.timer._collect()
-        if self.timer.ms:
+        private = self.vsr is not None and self.vsr.private  # NVIDIA's package: its timings stay off the log
+        timed = {k: v for k, v in self.timer.ms.items() if not (private and "RTX VSR" in k)}
+        if timed:
             parts = [f"{k} p50 {np.median(v):.2f} / p95 {np.percentile(v, 95):.2f} ms (n={len(v)})"
-                     for k, v in sorted(self.timer.ms.items(), key=lambda kv: -len(kv[1]))]
+                     for k, v in sorted(timed.items(), key=lambda kv: -len(kv[1]))]
             print("[display] GPU time to draw each frame: " + "; ".join(parts))
         self.timer.close()
         self._unwatch()
@@ -1349,7 +1492,7 @@ class GLWindowSink:
             self._vsr_target_free()
             self.vsr.close()
             v = self.vsr.gpu_ms
-            if v:
+            if v and not self.vsr.private:
                 print(f"[display] RTX VSR q{self.vsr.quality} GPU time per frame: p50 {np.median(v):.2f} / "
                       f"p95 {np.percentile(v, 95):.2f} ms (n={len(v)})")
         if self.fsr is not None:

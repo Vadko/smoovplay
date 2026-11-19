@@ -189,9 +189,10 @@ class RhythmLock:
     frame costs the encoder more than the repeat after it, however small both are, and that needs no line between
     "small" and "big"); else the checks' new-or-repeat call. Keyframes and ticks with no call say nothing.
 
-    seq: the stream's own frame number (Remote Play). Frames are counted by it rather than as they arrive, so a frame
-    lost on the way doesn't shift the count (in a real Gotham Knights session, 23 lost frames moved the rhythm 11
-    times when counted as they arrived)."""
+    seq: the stream's own frame number (Remote Play), or a capture card's count as frames come off the card (before
+    SmoovPlay's queue, which drops one when the PC falls behind). Frames are counted by it rather than as they arrive,
+    so a frame lost on the way doesn't shift the count (in a real Gotham Knights session, 23 lost frames moved the
+    rhythm 11 times when counted as they arrived)."""
 
     WINDOW, MARGIN, MIN = 32, 10, 8
 
@@ -285,6 +286,14 @@ UNEVEN_DWELL = 60  # ticks (a second) the rate has to stay there first, so a 30 
 # flip it on and off
 UNEVEN_MAX_DELAY = 2.0  # ticks
 
+# Dip smoothing (DipWatch, FrameTimeline.at_arrival): a 30 fps game that misses its slot shows a frame
+# for 3 ticks (50 ms) or, waiting for the next 30 fps slot, 4 (67 ms; Gotham Knights' hitches on PS5 Remote Play).
+DIP_HOLD = (3, 5)  # ticks a frame stays up to count as a dip; longer is a pause, a load or a still scene
+DIP_ON_HOLDS = 2  # dips in the last second (60 ticks) that switch it on...
+DIP_FPS = (15, 34)  # ...while the game's rate is in this range (a 40-60 fps game is Even out 40-60's)
+DIP_OFF_TICKS = 180  # ticks (3 s) without a dip, or out of that range, that switch it off again
+DIP_MAX_DELAY = 3.0  # ticks: enough to wait out a 4-tick hold
+
 
 @dataclass
 class TimedFrame:
@@ -296,19 +305,58 @@ class TimedFrame:
     cut: bool = False
     frame: object = None
     t_arrival: float = 0.0
-    reached: bool = False  # its time has come on screen
+    reached: bool = False  # it has been on screen (drawn as itself, or its time has passed)
 
 
 @dataclass
 class Place:
     """What to show at one display time: frame `a` itself, or (`b` not None) the frame at fraction t from a to b.
-    c: the game time shown. reached: frames whose time came with this one (for the delay stats)."""
+    c: the game time shown. reached: frames on screen for the first time with this one, drawn as themselves or
+    passed (for the delay stats, which the sound sync follows)."""
     a: TimedFrame
     b: TimedFrame | None = None
     t: float = 0.0
     c: float = 0.0
     reached: tuple = ()
     waiting: bool = False  # the game time shown is past the newest frame: the next one is late
+
+
+class DipWatch:
+    """Whether a game that runs at up to 30 fps is dipping below it right now (Dip smoothing).
+
+    At 30 fps on a 60 Hz stream each frame stays up 2 ticks. A frame the game finished late stays up 3 or 4 ticks
+    and the next one jumps, so motion freezes and lurches. While it's dipping, the pipeline times the game's frames
+    as they arrived (FrameTimeline.at_arrival) and draws evenly spaced frames from them, so a dip shows as a short
+    slow-down. That needs more delay (up to DIP_MAX_DELAY ticks), so it's only on while the game dips: DIP_ON_HOLDS
+    dips within a second, with the game at DIP_FPS; off after DIP_OFF_TICKS without one. update() takes the
+    picture's own call on each tick (not the 30 fps lock's, which can't see a dip).
+    """
+
+    def __init__(self) -> None:
+        self.n = -1
+        self.dipping = False
+        self._last_new: int | None = None
+        self._holds: deque = deque()  # ticks at which a held frame's successor arrived, over the last DIP_OFF_TICKS
+        self._recent: deque = deque(maxlen=60)  # new (1) or repeat (0), over the last second
+        self._out = 0  # ticks in a row with the game's rate outside DIP_FPS
+
+    def update(self, is_new: bool) -> bool:
+        self.n += 1
+        self._recent.append(1 if is_new else 0)
+        if is_new:
+            if self._last_new is not None and DIP_HOLD[0] <= self.n - self._last_new <= DIP_HOLD[1]:
+                self._holds.append(self.n)
+            self._last_new = self.n
+        while self._holds and self._holds[0] <= self.n - DIP_OFF_TICKS:
+            self._holds.popleft()
+        fps = sum(self._recent) if len(self._recent) == self._recent.maxlen else None
+        in_range = fps is not None and DIP_FPS[0] <= fps <= DIP_FPS[1]
+        self._out = 0 if in_range else self._out + 1
+        if not self.dipping:
+            self.dipping = in_range and sum(h > self.n - 60 for h in self._holds) >= DIP_ON_HOLDS
+        elif not self._holds or self._out >= DIP_OFF_TICKS:
+            self.dipping = False
+        return self.dipping
 
 
 class FrameTimeline:
@@ -321,6 +369,10 @@ class FrameTimeline:
     one's plus the recent average spacing, kept within that tick. The pipeline then shows the game's time `delay`
     ticks behind the display's (place()), drawing the in-between frame at the right fraction, so motion is even at
     60, 90 or 120 fps.
+
+    at_arrival (Dip smoothing, while DipWatch says the game is dipping): each new frame's time is the
+    tick it arrived on, not the average spacing, and the delay may grow to DIP_MAX_DELAY, so a frame the game held
+    for 3 or 4 ticks is waited for and the frames either side are spread to match.
 
     The two frames either side of a display time can be older than the newest two (a frame can arrive while there's
     still a frame to draw before the one before it), so the pipeline hands a frame to the interpolator only when
@@ -340,6 +392,17 @@ class FrameTimeline:
         self._recent: deque = deque(maxlen=60)  # new (1) or repeat (0), over the last second
         self._dwell = 0
         self._hz, self._j = 0, 0  # slots(): the output rate, and the next output frame's number
+        self.at_arrival = False  # Dip smoothing: frames timed as they arrived (set_at_arrival)
+
+    def set_at_arrival(self, on: bool) -> None:
+        if on == self.at_arrival:
+            return
+        self.at_arrival = on
+        if on:  # the delay the last few frames would have needed, timed as they arrived (the dips that switched it on)
+            a = list(self._arrivals)
+            self._need.clear()
+            self._need.extend(y - x - 1 for x, y in zip(a, a[1:]) if y - x <= DIP_HOLD[1])
+            self.delay = max(self.delay, self._want_delay())
 
     @property
     def period(self) -> float:
@@ -353,7 +416,7 @@ class FrameTimeline:
         return sum(self._recent) if len(self._recent) == self._recent.maxlen else None
 
     def _want_delay(self) -> float:
-        return min(UNEVEN_MAX_DELAY, max(self._need, default=1.0) + 0.05)
+        return min(DIP_MAX_DELAY if self.at_arrival else UNEVEN_MAX_DELAY, max(self._need, default=1.0) + 0.05)
 
     def tick(self, is_new: bool, is_cut: bool = False, frame=None, t_arrival: float = 0.0) -> TimedFrame | None:
         """One tick of the stream; a new frame goes on the timeline (and is returned)."""
@@ -365,6 +428,9 @@ class FrameTimeline:
             last = self._last
             if last is None:
                 t = float(self.n)
+            elif self.at_arrival and self.n - last.arrival <= DIP_HOLD[1]:
+                t = max(float(self.n), last.t + 0.05)  # as it arrived, a held frame's wait included
+                self._need.append(self.n - 1 - last.t)
             elif self.n - last.arrival > 3:  # after a hitch: as it comes
                 t = max(self.n - 0.95, last.t + 0.05)
             else:
@@ -425,5 +491,12 @@ class FrameTimeline:
         if b.cut or t < 0.04:  # across a cut, the frame before it until the new one's time comes
             return Place(a, c=c, reached=reached)
         if t > 0.96:
+            # b itself is on screen from now, so its delay counts from here, not from the next display time, when
+            # its time has passed. (Timed as it arrived, on a whole tick, a frame was drawn as itself a tick before
+            # its time passed, so Dip smoothing logged every frame a tick late, and the sound, which
+            # follows the logged delay, was held back that much too long.)
+            if not b.reached:
+                b.reached = True
+                reached += (b,)
             return Place(b, c=c, reached=reached)
         return Place(a, b, t, c, reached)

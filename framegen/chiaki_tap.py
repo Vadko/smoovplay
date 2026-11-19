@@ -4,10 +4,13 @@ chiaki-ng, built with the tap and started with CHIAKI_FRAMETAP=1, copies every c
 sends into a shared-memory ring. FrameTap reads that ring; ChiakiSource decodes it into Ticks for the pipeline.
 
 Compared with a capture card, each frame also carries what the stream knows about it:
-  - size: bytes of the compressed frame. After compression a repeated frame isn't an exact copy (the encoder
-    spends its few bytes sharpening the picture), so the image-based duplicate detector calls most repeats
-    new. Size doesn't have that problem: a repeat costs the encoder almost nothing (in tests ~3 KB against
-    ~60 KB for a new frame), so `new_hint` comes from size and the pipeline uses it instead of the image check.
+  - size: bytes of the compressed frame. A repeat costs the encoder little, so size says roughly which frames are
+    new (SizeRepeatDetector, in extra["size_new"]): kept for the frame log, the stream check and test mode. The
+    pipeline tells new frames from repeats by the picture instead (cadence.DuplicateDetector(learn=True), as for
+    an app's window): a decoded repeat is never an exact copy (the encoder spends its few bytes sharpening it),
+    but it changes 10 times or more less than a new frame. In real sessions that split them 93-99% right, where
+    size managed 3-35% (a repeat can be nearly half a new frame's size, and the size check stuck after still
+    scenes).
   - damaged: frames were lost before this one, or it's the PS5's recovery frame after a loss. The pipeline
     holds instead of interpolating, so a broken frame isn't smeared into the generated one.
 Windows only (named file mapping + named event).
@@ -396,7 +399,8 @@ def param_sets(data: bytes, codec: str) -> bytes:
 
 
 class SizeRepeatDetector:
-    """New frame or repeat, from compressed size alone.
+    """New frame or repeat, from compressed size alone. (Not the pipeline's call, which is the picture's: see the
+    module docstring. Kept for the stream check, test mode and the frame log.)
 
     A frame is new if it's at least `ratio` of a typical recent new frame (the 75th percentile of the last 16
     non-keyframe sizes: in a 30 fps game at 60 Hz half the frames are new, so that lands on a new one).
@@ -406,9 +410,12 @@ class SizeRepeatDetector:
     it; otherwise it returns None and the pipeline falls back to the image check.
     """
 
+    BIG_RUN = 6  # this many "big" frames among the last 2 * BIG_RUN aren't refresh frames but a busier scene
+
     def __init__(self, ratio: float = 0.4, window: int = 16) -> None:
         from collections import deque
         self.ratio = ratio
+        self._recent: deque[tuple[int, bool]] = deque(maxlen=2 * self.BIG_RUN)  # (size, big) of the last frames
         self.sizes: deque[int] = deque(maxlen=window)
         self.decisions: deque[bool] = deque(maxlen=6)
         self.ref: float | None = None  # the last update's typical new frame size (None: keyframe or warming up)
@@ -417,6 +424,16 @@ class SizeRepeatDetector:
     def update(self, size: int, keyframe: bool) -> bool | None:
         # The PS5's refresh frames are ordinary slices by NAL type, but far bigger than anything recent.
         self.big = not keyframe and len(self.sizes) >= 8 and size > 4 * float(np.percentile(self.sizes, 75))
+        # After a still scene (a menu, a pause: ~1 KB frames), the new frames of the motion that follows (and often
+        # the repeats) look big, and big frames never joined the sizes, so the check stayed silent for the rest of
+        # the session (55-91% of ticks in real logs). Many of them recently is the new normal: start from those.
+        if not keyframe:
+            self._recent.append((size, self.big))
+        if sum(b for _, b in self._recent) >= self.BIG_RUN:
+            self.sizes.clear()
+            self.sizes.extend(s for s, _ in list(self._recent)[:-1])  # (this frame joins below, as an ordinary one)
+            self._recent.clear()
+            self.big = False
         self.ref = None
         if keyframe or self.big:
             d = list(self.decisions)
@@ -463,12 +480,15 @@ class ChiakiSource:
     Joins the live stream (never replays old frames) and asks the PS5 for a keyframe whenever it can't decode:
     at start, after falling more than the ring's 32 frames behind, or after a decode error.
     """
+    app, tag = False, "[chiaki]"  # chiaki-ng's frames (__init__: or another app's, through framegen/tap.py)
 
     def __init__(self, decoder: str = "sw", wait_s: float = 120.0, log_path: str | None = None,
-                 tap_name: str = NAME, test=None) -> None:
+                 tap_name: str = NAME, test=None, app: bool = False) -> None:
         """test: a framegen.sources.TestMode ("Simulate a 30 fps game"), applied as frames are decoded, before
-        the queue, so a frame dropped from a full queue never shifts which frames it keeps."""
+        the queue, so a frame dropped from a full queue never shifts which frames it keeps. app: another app writes
+        chiaki-ng's layout (framegen/tap.py open_tap): the log and notes say "[tap]" and "the app", not chiaki-ng."""
         from .sources import source_info
+        self.app, self.tag = app, "[tap]" if app else "[chiaki]"
         self.tap = FrameTap(tap_name, tap_name + "-frame")
         self.sound = AudioTap(tap_name + AUDIO_SUFFIX)  # the game's sound, for instant replay
         self._sound_session: int | None = None
@@ -480,16 +500,21 @@ class ChiakiSource:
         printed = False
         while not (h := self.tap.header()).live:
             if not printed:
-                print("[chiaki] waiting for chiaki-ng to start a stream (run it with CHIAKI_FRAMETAP=1)...")
+                print("[tap] waiting for an app to start sending frames..." if app else
+                      "[chiaki] waiting for chiaki-ng to start a stream (run it with CHIAKI_FRAMETAP=1)...")
                 printed = True
             if time.perf_counter() > t_end:
-                raise TimeoutError("no chiaki-ng stream on the frame tap")
+                raise TimeoutError("no app is sending frames to the frame tap" if app else
+                                   "no chiaki-ng stream on the frame tap")
             self.tap.wait(0.25)
         self.w, self.h, self.codec_id = h.width, h.height, h.codec
         self.info = source_info("chiaki", hz=float(h.max_fps))
-        print(f"[chiaki] stream: {CODEC_NAMES.get(h.codec, h.codec)} {h.width}x{h.height}, up to {h.max_fps} fps")
+        what = f"{CODEC_NAMES.get(h.codec, h.codec)} {h.width}x{h.height}, up to {h.max_fps} fps"
+        print(f"[tap] frames: {what}" if app else f"[chiaki] stream: {what}")  # (the launcher reads both)
         if h.max_fps < 60:
-            print("[chiaki] WARNING: the stream is set to 30 fps. Set chiaki-ng's frame rate to 60 so the "
+            print(f"[tap] WARNING: the stream is set to {h.max_fps} fps. Send 60 so the pipeline sees the console's "
+                  "60 Hz output (it expects repeats, not every other frame missing)." if app else
+                  "[chiaki] WARNING: the stream is set to 30 fps. Set chiaki-ng's frame rate to 60 so the "
                   "pipeline sees the PS5's 60 Hz output (it expects repeats, not every other frame missing).")
         self.hdr_stream = h.codec == 2  # chiaki-ng's H.265 HDR codec: 10-bit HDR10 from the PS5
         self.convert = None  # set_hdr(): a framegen.hdr.StreamConverter, when SmoovPlay's HDR setting is on
@@ -560,7 +585,7 @@ class ChiakiSource:
             h = self.tap.header()
             if not h.live:
                 if decoded:  # the stream we were showing ended
-                    print("[chiaki] stream ended")
+                    print("[tap] the app stopped sending frames" if self.app else "[chiaki] stream ended")
                     self.q.put(None)
                     return
                 self.tap.wait(0.25)  # not started yet, or being reconnected
@@ -568,7 +593,7 @@ class ChiakiSource:
             if h.session != session:  # a new stream
                 session, codec = h.session, CODECS.get(h.codec, "h264")
                 if (h.width, h.height) != (self.w, self.h):
-                    print(f"[chiaki] stream size changed to {h.width}x{h.height}; restart run.py", file=sys.stderr)
+                    print(f"{self.tag} stream size changed to {h.width}x{h.height}; restart run.py", file=sys.stderr)
                     self.q.put(None)
                     return
                 dec, params, pending, decoded, damaged_left, errors, held = None, b"", b"", False, 0, 0, -1
@@ -579,7 +604,7 @@ class ChiakiSource:
                 if late:  # joining a running stream: an earlier run.py may have saved its header
                     params = self._load_header(session, h.codec)
                     if params:
-                        print("[chiaki] joined a running stream, using its saved codec header")
+                        print(f"{self.tag} joined a running stream, using its saved codec header")
                     else:
                         self._ask_idr()
                 self._no_header = late and not params
@@ -597,9 +622,10 @@ class ChiakiSource:
                 passed, damaged_left = False, 60
                 self._ask_idr()
             if late and not params and not told and time.perf_counter() - t_join > 3:
-                print("[chiaki] this stream was already running, so its codec header went past before the pipeline "
-                      "started. In chiaki-ng press Ctrl+O, click the x to end the stream, then connect again: the "
-                      "pipeline picks up the new stream from its start.")
+                print(f"{self.tag} this stream was already running, so its codec header went past before the "
+                      "pipeline started. " + ("Restart the stream in the app" if self.app else
+                                              "In chiaki-ng press Ctrl+O, click the x to end the stream, then connect "
+                                              "again") + ": the pipeline picks up the new stream from its start.")
                 told = True
             if h.write_seq == seq:
                 self.tap.heartbeat()
@@ -657,7 +683,7 @@ class ChiakiSource:
             except av.error.FFmpegError as e:
                 # Keep the decoder (it holds the header and reference frames) and hold the next few frames; the
                 # PS5 answers a keyframe request with a refresh frame.
-                print(f"[chiaki] decode error at frame {p.seq}: {e}", file=sys.stderr)
+                print(f"{self.tag} decode error at frame {p.seq}: {e}", file=sys.stderr)
                 damaged_left, errors = DAMAGE_HOLD, errors + 1
                 if errors >= 30:  # stuck: start a decoder afresh from the saved header
                     dec, errors, pending = self._new_decoder(codec), 0, params
@@ -666,17 +692,17 @@ class ChiakiSource:
             if not frames:  # (a decoder that holds a frame back)
                 continue
             decoded = True
-            new_hint = sizes.update(len(p.data), key)
+            size_new = sizes.update(len(p.data), key)
             damaged = bool(p.frames_lost > 0 or p.recovered or p.truncated or damaged_left > 0)
             for img in images:
                 decode_ms = (time.perf_counter() - t) * 1000
                 # Ready = arrival + decode time: what the pipeline's "behind" check has always measured from.
-                tick = Tick(img, p.t_arrival, 0, new_hint=new_hint, damaged=damaged,
+                tick = Tick(img, p.t_arrival, 0, damaged=damaged,
                             t_ready=p.t_arrival + decode_ms / 1000,
                             extra={"seq": p.seq, "size": len(p.data), "frames_lost": p.frames_lost,
                                    "recovered": p.recovered, "keyframe": key, "decode_ms": decode_ms,
-                                   # for the stream check: test mode replaces new_hint, these stay as the stream said
-                                   "size_new": new_hint, "size_ref": sizes.ref, "big": sizes.big})
+                                   # the size check's call: for the stream check, test mode and the frame log
+                                   "size_new": size_new, "size_ref": sizes.ref, "big": sizes.big})
                 if self.test is not None and (tick := self.test(tick)) is None:
                     continue
                 try:
@@ -692,7 +718,7 @@ class ChiakiSource:
             img = self.convert(fr)
             if not self.convert.said:
                 self.convert.said = True
-                print(f"[chiaki] HDR: the stream is {self.convert.describe()}")
+                print(f"{self.tag} HDR: the stream is {self.convert.describe()}")
             return img
         return cuda_frame_to_bgr(fr) if self.decoder_kind == "cuda" else fr.to_ndarray(format="bgr24")
 
@@ -703,21 +729,22 @@ class ChiakiSource:
         self._hdr_told = True
         if out is None:
             if self.hdr_stream and why:
-                print(f"[chiaki] WARNING: this stream is HDR, but {why}, so its colours look washed out. Pick a codec "
-                      "without HDR in chiaki-ng's Video settings.")
+                print(f"{self.tag} WARNING: this stream is HDR, but {why}, so its colours look washed out. "
+                      + ("Have the app send it without HDR." if self.app else
+                         "Pick a codec without HDR in chiaki-ng's Video settings."))
             elif self.hdr_stream:
-                print("[chiaki] WARNING: this stream is HDR, and HDR is off in SmoovPlay's settings, so its colours "
-                      "look washed out. Turn on HDR in SmoovPlay's Settings (Picture), or pick a codec without HDR in "
-                      "chiaki-ng.")
+                print(f"{self.tag} WARNING: this stream is HDR, and HDR is off in SmoovPlay's settings, so its colours "
+                      "look washed out. Turn on HDR in SmoovPlay's Settings (Picture), or "
+                      + ("have the app send it without HDR." if self.app else "pick a codec without HDR in chiaki-ng."))
             return
         if not self.hdr_stream:
-            print("[chiaki] HDR is on in SmoovPlay's settings, but this stream isn't HDR: shown as usual. (For HDR, "
-                  "pick chiaki-ng's H.265 HDR codec.)")
+            print(f"{self.tag} HDR is on in SmoovPlay's settings, but this stream isn't HDR: shown as usual."
+                  + ("" if self.app else " (For HDR, pick chiaki-ng's H.265 HDR codec.)"))
             return
         from .hdr import StreamConverter
         import torch
         self.convert = StreamConverter(out, "cuda" if torch.cuda.is_available() else "cpu", display_peak=display_peak)
-        print("[chiaki] HDR stream: " + ("kept HDR for the HDR display" if out == "pq16" else "shown in SDR")
+        print(f"{self.tag} HDR stream: " + ("kept HDR for the HDR display" if out == "pq16" else "shown in SDR")
               + " (HDR is Experimental)")
 
     def _ask_idr(self) -> None:
@@ -793,14 +820,16 @@ class ChiakiSource:
         if h.write_seq != self._ring[0]:
             self._ring = (h.write_seq, now)
         if not h.live:
-            return "chiaki-ng isn't streaming. Connect to the PS5 in chiaki-ng (or wait while it reconnects)"
+            return ("The app isn't streaming. Start its stream (or wait while it reconnects)" if self.app else
+                    "chiaki-ng isn't streaming. Connect to the PS5 in chiaki-ng (or wait while it reconnects)")
         if now - self._beat > 3:
             return "SmoovPlay's video decoder has stopped. Press Q, then Play again"
         if now - self._ring[1] > 1:
-            return "chiaki-ng isn't sending any frames. Is its stream still running?"
+            return ("The app" if self.app else "chiaki-ng") + " isn't sending any frames. Is its stream still running?"
         if self._no_header:
             return ("This stream started before SmoovPlay, so its start is missing.\n"
-                    "In chiaki-ng press Ctrl+O, click the x to end the stream, then connect again")
+                    + ("Restart the stream in the app" if self.app else
+                       "In chiaki-ng press Ctrl+O, click the x to end the stream, then connect again"))
         return ""
 
     def __iter__(self):
@@ -817,7 +846,7 @@ class ChiakiSource:
         if self._log is None:
             return
         e = tick.extra
-        hint = tick.new_hint
+        hint = e.get("size_new")
         self._log[1].writerow([tick.index, e.get("seq"), f"{(tick.t_arrival - self._t0) * 1000:.2f}", e.get("size"),
                                e.get("frames_lost"), int(bool(e.get("recovered"))), int(bool(e.get("keyframe"))),
                                f"{e.get('decode_ms', 0):.2f}", f"{(t_start - tick.t_arrival) * 1000:.2f}",
@@ -832,5 +861,5 @@ class ChiakiSource:
             self.sound.close()
         except (BufferError, ValueError):  # still being read: it goes with the process
             pass
-        print(f"[chiaki] decoded frames dropped: {self.dropped}, stream frames skipped: {self.skipped}, "
+        print(f"{self.tag} decoded frames dropped: {self.dropped}, stream frames skipped: {self.skipped}, "
               f"keyframe requests: {self.idr_requests}")

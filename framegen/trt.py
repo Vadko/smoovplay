@@ -104,7 +104,9 @@ class TrtIFNet:
         builder = trt.Builder(self.logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         parser = trt.OnnxParser(network, self.logger)
-        if not parser.parse_from_file(str(onnx_path)):
+        # From memory rather than parse_from_file: TensorRT opens files by Windows' narrow (ANSI) names, so an
+        # install folder with letters outside English (e.g. Chinese) failed here, during setup's Optimise step
+        if not parser.parse(onnx_path.read_bytes()):
             errs = "; ".join(str(parser.get_error(i)) for i in range(parser.num_errors))
             raise RuntimeError(f"TensorRT could not parse the ONNX export: {errs}")
         config = builder.create_builder_config()

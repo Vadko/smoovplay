@@ -1,0 +1,52 @@
+# Keeps the README's download count up to date: every 6 hours and when a release is published, adds GitHub's live
+# setup download counts to the ones from before they were reset (.github/download-baseline.json) and, when the total
+# has changed, commits it to the `stats` branch (downloads.json for the badge, history.csv). Nothing goes to main.
+name: Download count
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: download-count
+  cancel-in-progress: false
+
+jobs:
+  count:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+      - name: Check out the stats branch (or start it)
+        run: |
+          if git ls-remote --exit-code --heads origin stats >/dev/null; then
+            git fetch --depth=1 origin stats
+            git worktree add ../stats FETCH_HEAD
+            git -C ../stats switch -c stats
+          else
+            git worktree add --orphan -b stats ../stats
+          fi
+      - name: Count
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python .github/scripts/download_count.py ../stats
+      - name: Commit if it changed
+        working-directory: ../stats
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Unchanged: nothing to commit."
+            exit 0
+          fi
+          total=$(tail -n 1 history.csv | cut -d, -f2)
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Downloads: $total"
+          git push origin stats

@@ -138,11 +138,13 @@ class Previewer:
 
     def picture(self, sample: str, w: int, h: int) -> np.ndarray:
         import cv2
+
+        from .imagefile import read_image
         key = (sample, w, h)
         if key not in self._pictures:
             if sample not in self.samples:
                 raise ValueError(f"there's no sample picture called {sample!r}")
-            img = cv2.imread(self.samples[sample]["path"])
+            img = read_image(self.samples[sample]["path"])
             if img is None:
                 raise ValueError(f"couldn't read the sample picture {sample!r}")
             if len(self._pictures) > 16:
@@ -171,7 +173,7 @@ class Previewer:
 
 
 def serve(inp=None, out=None, previewer: Previewer | None = None) -> int:
-    import cv2
+    from .imagefile import write_image
     inp = inp or sys.stdin
     if out is None:
         out = sys.stdout
@@ -195,7 +197,7 @@ def serve(inp=None, out=None, previewer: Previewer | None = None) -> int:
                 t = time.perf_counter()
                 img = pv.render(req["look"], req["sample"], req.get("width", 640), req.get("height", 360),
                                 int(req.get("frame", 0)))
-                if not cv2.imwrite(req["out"], img):
+                if not write_image(req["out"], img):
                     raise OSError(f"couldn't write {req['out']}")
                 say({"id": rid, "file": req["out"], "sample": req["sample"],
                      "ms": round((time.perf_counter() - t) * 1000, 1)})

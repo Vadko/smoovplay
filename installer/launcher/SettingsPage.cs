@@ -47,6 +47,8 @@ namespace SmoovPlay
             public readonly List<string> WhyNot = new List<string>();  // what this PC lacks for each choice (null = nothing)
             public string AppliesKey;  // only used while that setting is one of AppliesValues (null: always)
             public readonly List<object> AppliesValues = new List<object>();
+            public readonly List<string> Sources = new List<string>();  // only used with these sources (none: all)
+            public readonly Dictionary<string, string> Elsewhere = new Dictionary<string, string>();  // source -> why not ("": any)
             public bool OnOff { get { return Choices.Count == 2 && Choices.All(c => c.Key is bool); } }
 
             public string Hint(object value)
@@ -66,6 +68,17 @@ namespace SmoovPlay
             public bool AppliesTo(Func<string, object> value)
             {
                 return AppliesKey == null || AppliesValues.Any(a => Same(a, value(AppliesKey)));
+            }
+
+            /// <summary>Why it isn't used with frames from this source (a SourceDef.Kind), or null if it is
+            /// (settings.py Spec.unused_with).</summary>
+            public string UnusedWith(string source)
+            {
+                if (Sources.Count == 0 || Sources.Contains(source)) return null;
+                string why;
+                if (Elsewhere.TryGetValue(source, out why) && !string.IsNullOrEmpty(why)) return why;
+                if (Elsewhere.TryGetValue("", out why) && !string.IsNullOrEmpty(why)) return why;
+                return "Not used with this source.";
             }
         }
 
@@ -167,6 +180,10 @@ namespace SmoovPlay
                     s.AppliesKey = (string)applies["key"];
                     s.AppliesValues.AddRange((object[])applies["values"]);
                 }
+                if (d.ContainsKey("sources") && d["sources"] is object[])
+                    s.Sources.AddRange(((object[])d["sources"]).OfType<string>());
+                if (d.ContainsKey("elsewhere") && d["elsewhere"] is Dictionary<string, object>)
+                    foreach (var kv in (Dictionary<string, object>)d["elsewhere"]) s.Elsewhere[kv.Key] = kv.Value as string;
                 var impact = d.ContainsKey("impact") ? d["impact"] as Dictionary<string, object> : null;
                 if (impact != null)
                 {
@@ -503,7 +520,22 @@ namespace SmoovPlay
                 Grid.SetRow(helpText, 1);
                 Grid.SetColumnSpan(helpText, 2);
                 g.Children.Add(helpText);
-                if (row.Hint != null)
+                if (row.Hint != null && spec.Key == "fill")
+                {
+                    // Fill the screen: a drawing of the picked choice on this PC's screen, its hint beside it (FillPreview.cs)
+                    var wrap = new Grid { Margin = new Thickness(0, 8, 0, 0) };
+                    wrap.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                    wrap.ColumnDefinitions.Add(new ColumnDefinition());
+                    wrap.Children.Add(FillPreview());
+                    row.Hint.Foreground = R("Text");
+                    row.Hint.Margin = new Thickness(18, FillPad, 0, 0);
+                    Grid.SetColumn(row.Hint, 1);
+                    wrap.Children.Add(row.Hint);
+                    Grid.SetRow(wrap, 3);
+                    Grid.SetColumnSpan(wrap, 2);
+                    g.Children.Add(wrap);
+                }
+                else if (row.Hint != null)
                 {
                     row.Hint.Foreground = R("Text");
                     row.Hint.Margin = new Thickness(2, 8, 0, 0);
@@ -537,11 +569,19 @@ namespace SmoovPlay
             var rb = new RadioButton { Style = S("Seg"), Content = name, Tag = value, GroupName = "set_" + row.Spec.Key };
             if (bar.Children.Count > 0) rb.Margin = new Thickness(2, 0, 0, 0);
             ToolTipService.SetShowOnDisabled(rb, true);  // why it's greyed out
+            // Under its own segment: at the mouse, a tooltip stays where the mouse came in (moving left along the row,
+            // the next segment's right edge), behind the mouse once it moves on.
+            ToolTipService.SetPlacement(rb, PlacementMode.Bottom);
             string hint = SegHint(row, value);
             AutomationProperties.SetName(rb, name);
             AutomationProperties.SetHelpText(rb, hint);
             AutomationProperties.SetAutomationId(rb, "Set_" + row.Spec.Key + "_" + (value == OffTag ? "off" : Json.Serialize(value).Trim('"')));
             rb.Checked += (s, e) => PickSeg(row, value);
+            if (row.Spec.Key == "fill")  // the drawing shows the choice under the mouse, then the picked one again
+            {
+                rb.MouseEnter += (s, e) => fillDraw?.Invoke(value as string);
+                rb.MouseLeave += (s, e) => fillDraw?.Invoke(fillPicked);
+            }
             row.Segs.Add(rb);
             bar.Children.Add(rb);
         }
@@ -656,7 +696,10 @@ namespace SmoovPlay
                 {
                     var spec = row.Spec;
                     object v = value(spec);
-                    string off = why(spec.Key) ?? (row.Off != null ? why(row.Off.Key) : null);
+                    // Nothing playing: greyed out if it isn't used with the source picked on the Play page (playing,
+                    // the session says, in `disabled`). E.g. Capture card resolution with Remote Play.
+                    string off = why(spec.Key) ?? (row.Off != null ? why(row.Off.Key) : null)
+                                 ?? (live ? null : spec.UnusedWith(source.Kind));
                     bool on = !locked && off == null;
                     var ok = allowed != null && allowed.ContainsKey(spec.Key) ? allowed[spec.Key] as object[] : null;
                     Show(row.Element, spec.AppliesTo(valueOf));
@@ -686,6 +729,11 @@ namespace SmoovPlay
                         string picked = running ? spec.Hint(v) : row.Off.Hint(false);
                         row.Hint.Text = picked;
                         Show(row.Hint, picked.Length > 0);
+                        if (spec.Key == "fill")
+                        {
+                            fillPicked = v as string ?? "fit";
+                            fillDraw?.Invoke(fillPicked);
+                        }
                     }
                     else
                     {

@@ -74,3 +74,19 @@ def test_the_opengl_preview_matches_the_reference(lib):
                 assert d.max() <= 2 and d.mean() < 0.5, (name, s["id"], d.max(), d.mean())
     finally:
         pv.close()
+
+
+def test_pictures_are_read_and_written_in_a_folder_with_chinese_letters(tmp_path):
+    """OpenCV's imread/imwrite open files by Windows' narrow names and fail on such a folder (issue 24: an install
+    folder with Chinese letters); framegen.imagefile has Python open them."""
+    from framegen.imagefile import read_image, write_image
+    folder = tmp_path / "杂项 é"
+    folder.mkdir()
+    img = np.zeros((6, 8, 4), np.uint8)
+    img[..., 2], img[..., 3] = 200, 128
+    assert write_image(folder / "x.png", img)
+    back = read_image(folder / "x.png", cv2.IMREAD_UNCHANGED)
+    assert back is not None and back.shape == (6, 8, 4) and (back == img).all()
+    assert read_image(folder / "x.png").shape == (6, 8, 3)  # colour, as cv2.imread gives by default
+    assert read_image(folder / "missing.png") is None
+    assert not write_image(folder / "no such folder" / "x.png", img)

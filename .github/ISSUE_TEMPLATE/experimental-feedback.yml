@@ -8,7 +8,8 @@ body:
       value: |
         Thanks for trying it. Experimental features are built from the best information we have, without the
         hardware to test every setup, so reports like yours are how they get better. Whether it worked or not, it
-        helps. SmoovPlay's **Send feedback** button has already copied your diagnostics: paste them at the end.
+        helps. Please paste SmoovPlay's diagnostics at the end, copied **after a session where it happened**:
+        they include that session's log, which is what shows what went wrong.
   - type: input
     id: feature
     attributes:
@@ -42,5 +43,5 @@ body:
     id: diagnostics
     attributes:
       label: Diagnostics
-      description: Paste what Send feedback (or Copy diagnostics, on SmoovPlay's Help page) put on your clipboard. It leaves out your Windows user name, but have a look before posting.
+      description: After playing, press Copy diagnostics on SmoovPlay's Help page (Send feedback copies them too) and paste them here. They leave out your Windows user name, but have a look before posting.
       render: text

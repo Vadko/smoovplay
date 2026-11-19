@@ -128,7 +128,7 @@ def test_remote_play_through_a_fake_ps5(clip60, native):
     try:
         tm = TestMode(native)
         src = ChiakiSource("sw", wait_s=20, tap_name=tap, test=tm)
-        assert (src.w, src.h) == (W, H) and src.info.kind == "chiaki" and src.info.repeats == "hint"
+        assert (src.w, src.h) == (W, H) and src.info.kind == "chiaki" and src.info.repeats == "pixels"
         ticks, kept = [], {}
         for t in src:
             if isinstance(t, Waiting):  # no frame for a moment (the fake PS5 starting, or ending): not a tick
@@ -152,7 +152,8 @@ def test_remote_play_through_a_fake_ps5(clip60, native):
         assert all(t.new_hint == t.truth_new for t in ticks)
         assert all(t.content == 2 * (i // 2) for i, t in enumerate(ticks))
     else:
-        hints = [t.new_hint for t in ticks[8:]]  # once the size detector has seen a few frames
+        assert all(t.new_hint is None for t in ticks)  # the pipeline tells repeats by the picture
+        hints = [t.extra["size_new"] for t in ticks[8:]]  # the size check, once it has seen a few frames
         alternating = sum(h == (i % 2 == 0) for i, h in enumerate(hints))
         assert max(alternating, len(hints) - alternating) >= 0.9 * len(hints), hints
 
@@ -201,6 +202,31 @@ def test_detector_per_source():
     assert make_detector(source_info("capture")).reference == "new"
     for kind in ("chiaki", "file", "sim"):
         assert make_detector(source_info(kind)).reference == "previous"
+    assert {k for k in ("chiaki", "capture", "window", "tap", "file", "sim") if make_detector(source_info(k)).learn}         == {"chiaki", "window", "tap"}
+
+
+def test_remote_play_repeats_are_told_by_the_picture():
+    """A decoded Remote Play repeat isn't an exact copy: the encoder sharpens a few blocks (here one block moves by
+    3, over the fixed line of 2), while a new frame moves everywhere. As in real 30 fps sessions (new frames' mean
+    difference 1-9, repeats' 0.02-0.2): the learned check calls them right, the fixed line calls repeats new."""
+    rng = np.random.default_rng(5)
+    base = rng.integers(40, 200, (64, 64, 3)).astype(np.int16)
+    frames, truth = [], []
+    for i in range(120):
+        if i % 2 == 0:  # new: the whole picture changes
+            base = base + rng.choice([-5, 5])
+            f = base.copy()
+        else:  # repeat: one 16x16 block sharpened a little
+            f = base.copy()
+            f[:16, :16] += 3
+        frames.append(torch.from_numpy(np.clip(f, 0, 255).astype(np.uint8)))
+        truth.append(i % 2 == 0)
+    learned = make_detector(source_info("chiaki"))
+    fixed = make_detector(source_info("file"))
+    by_learned = [learned.update(f).is_new for f in frames]
+    by_fixed = [fixed.update(f).is_new for f in frames]
+    assert by_learned[20:] == truth[20:]
+    assert sum(by_fixed[20:]) == 100  # every repeat called new
 
 
 def test_comparing_with_the_last_new_frame_catches_a_slow_change():
@@ -233,5 +259,5 @@ def test_run_py_lists_sources_quickly_without_loading_the_pipeline():
     assert r.returncode == 0, r.stderr
     data = json.loads(r.stdout)
     assert [s["kind"] for s in data["sources"]] == ["chiaki", "capture", "window", "tap", "file"]
-    assert data["sources"][0]["name"] == "PS5 Remote Play" and data["sources"][0]["repeats"] == "hint"
+    assert data["sources"][0]["name"] == "PS5 Remote Play" and data["sources"][0]["repeats"] == "pixels"
     assert time.perf_counter() - t0 < 5  # no torch import

@@ -1,7 +1,10 @@
 """In-video settings menu: keyboard-driven, drawn as an image that the GL window blits over the video.
 
-Rows come from settings.SPECS, so a new setting shows up here without changes to this file. Drawing happens
-only when something on the menu changes (the window caches the image), so an open menu costs nothing per frame.
+Rows come from settings.SPECS, so a new setting shows up here without changes to this file. The main page has the
+quick picks (Spec.quick choices that apply live: the launcher's big choices) and a row for each section (Spec.group,
+as on the launcher's Settings page); Enter or Right opens a section's page, Esc or Backspace goes back. Drawing
+happens only when something on the menu changes (the window caches the image), so an open menu costs nothing per
+frame.
 """
 from __future__ import annotations
 
@@ -24,11 +27,17 @@ IMPACT = (200, 200, 200)
 DIM = (95, 95, 95)
 RULE = (70, 66, 62)
 
+# A row: ("setting", Spec), ("section", its name) or ("restart", None)
+Row = tuple[str, object]
+
 
 class Menu:
     """allowed(key, value): whether a choice can be picked now (e.g. RTX VSR when the SDK isn't installed).
     disabled(key): a reason to grey out a whole row, or None. restart_reasons(): labels of settings changed
-    since start that need a restart. Changes go through Settings, whose watchers apply them."""
+    since start that need a restart. Changes go through Settings, whose watchers apply them.
+
+    page: the section shown, or None for the main page. It stays when the menu closes, so the player comes back to
+    where they were."""
 
     def __init__(self, settings: Settings, specs: tuple[Spec, ...] = SPECS,
                  allowed: Callable[[str, object], bool] | None = None,
@@ -39,25 +48,63 @@ class Menu:
         self.disabled = disabled or (lambda k: None)
         self.restart_reasons = restart_reasons or (lambda: [])
         self.open = False
+        self.page: str | None = None
         self.index = 0
-        self._sel: str | None = None  # the highlighted setting's key, and the index it was at (see _follow)
+        self._sel: str | None = None  # the highlighted row's key, and the index it was at (see _follow)
         self._at = 0
-        self._foot_key, self._foot_h = None, 0  # render(): the help area's height, for these rows at this size
+        self._left: dict[str, str] = {}  # each section's highlighted row when the player last left it
+        self._size_key, self._size = None, (0, 0)  # render(): the longest page and the tallest help, for these rows
 
-    def rows(self) -> list[tuple[str, Spec | None]]:
-        """The settings that apply right now (VFG quality only while NVIDIA VFG is picked, and so on)."""
+    def sections(self) -> list[str]:
+        """The sections that have a setting that applies right now, in SPECS order."""
         values = self.settings.values()
-        rows: list[tuple[str, Spec | None]] = [("setting", s) for s in self.specs if s.applies_to(values)]
+        out: list[str] = []
+        for s in self.specs:
+            if s.group and s.group not in out and s.applies_to(values):
+                out.append(s.group)
+        return out
+
+    def page_rows(self, page: str | None) -> list[Row]:
+        """A page's rows: the settings that apply right now (VFG quality only while NVIDIA VFG is picked, and so on),
+        on the main page the quick picks and the sections, and Restart now when something needs it."""
+        values = self.settings.values()
+        if page is None:
+            rows: list[Row] = [("setting", s) for s in self.specs
+                               if (s.quick and s.live or not s.group) and s.applies_to(values)]
+            rows += [("section", g) for g in self.sections()]
+        else:
+            rows = [("setting", s) for s in self.specs if s.group == page and s.applies_to(values)]
         if self.restart_reasons():
             rows.append(("restart", None))
         return rows
 
-    def _follow(self, rows: list) -> None:
-        """Keeps the highlight on the same setting when rows appear or go (a model or upscaler change)."""
-        keys = [s.key if s is not None else kind for kind, s in rows]  # "restart" for the Restart now row
+    def rows(self) -> list[Row]:
+        """The rows of the page shown (the main page, if its section has gone: nothing in it applies any more)."""
+        if self.page is not None and self.page not in self.sections():
+            self.page = None
+        return self.page_rows(self.page)
+
+    @staticmethod
+    def _row_key(row: Row) -> str:
+        kind, item = row
+        return item.key if kind == "setting" else f"section:{item}" if kind == "section" else kind
+
+    def _follow(self, rows: list[Row]) -> None:
+        """Keeps the highlight on the same row when rows appear or go (a model or upscaler change)."""
+        keys = [self._row_key(r) for r in rows]
         if self.index == self._at and self._sel in keys:  # (index set from outside: that row, as given)
             self.index = keys.index(self._sel)
         self.index = min(self.index, len(rows) - 1)
+        self._sel, self._at = keys[self.index], self.index
+
+    def _show(self, page: str | None) -> None:
+        """Opens a section's page (on the row it was left on), or goes back to the main page (on that section)."""
+        if self.page is not None:
+            self._left[self.page] = self._sel
+        want = f"section:{self.page}" if page is None else self._left.get(page)
+        self.page = page
+        keys = [self._row_key(r) for r in self.rows()]
+        self.index = keys.index(want) if want in keys else 0
         self._sel, self._at = keys[self.index], self.index
 
     def key(self, name: str) -> str | None:
@@ -65,25 +112,35 @@ class Menu:
         rows = self.rows()
         self._follow(rows)
         if name == "back":
-            return "close"
+            if self.page is None:
+                return "close"
+            self._show(None)
+            return None
         if name in ("up", "down"):
             self.index = (self.index + (-1 if name == "up" else 1)) % len(rows)
-            kind, spec = rows[self.index]
-            self._sel, self._at = (spec.key if spec is not None else kind), self.index
+            self._sel, self._at = self._row_key(rows[self.index]), self.index
             return None
-        kind, spec = rows[self.index]
+        kind, item = rows[self.index]
         if kind == "restart":
             return "restart" if name == "enter" else None
-        if self.disabled(spec.key):
+        if kind == "section":
+            if name in ("enter", "right"):
+                self._show(item)
+            return None
+        if self.disabled(item.key):
             return None
         if name in ("left", "right", "enter"):
-            self.settings.step(spec.key, -1 if name == "left" else 1, self.allowed)
+            self.settings.step(item.key, -1 if name == "left" else 1, self.allowed)
         return None
 
     def state(self) -> tuple:
         """Everything the drawing depends on (the window redraws only when this changes)."""
-        return (self.index, tuple(self.settings.values().items()), tuple(self.restart_reasons()),
+        return (self.page, self.index, tuple(self.settings.values().items()), tuple(self.restart_reasons()),
                 tuple(self.disabled(s.key) for s in self.specs))
+
+    def _section_help(self, section: str) -> str:
+        labels = [s.label for kind, s in self.page_rows(section) if kind == "setting"]
+        return "In here: " + (", ".join(labels[:-1]) + " and " + labels[-1] if len(labels) > 1 else labels[0]) + "."
 
     def render(self, ui: float = 1.0) -> np.ndarray:
         """The menu as a BGR image; ui scales it (1.0 suits a 1080p-tall window)."""
@@ -96,40 +153,54 @@ class Menu:
         rows = self.rows()
         self._follow(rows)
 
-        def foot(kind, spec) -> tuple[list[str], list[str]]:
+        def foot(kind: str, item) -> tuple[list[str], list[str]]:
             """A row's help under the list, and under that its rough effect on the picture and on speed."""
+            impact: list[str] = []
             if kind == "restart":
                 text = "Restarts the pipeline with the new settings. The stream keeps running; takes a few seconds."
+            elif kind == "section":
+                text = self._section_help(item)
             else:
-                text = self.disabled(spec.key) or spec.help
-            impact: list[str] = []
-            if kind != "restart" and not self.disabled(spec.key):
-                for k, name in (("picture", "Picture"), ("speed", "Speed")):
-                    if spec.impact.get(k):
-                        impact += _wrap(f"{name}: {spec.impact[k]}", w - 2 * pad, small, th)[:2]
+                text = self.disabled(item.key) or item.help
+                if not self.disabled(item.key):
+                    for k, name in (("picture", "Picture"), ("speed", "Speed")):
+                        if item.impact.get(k):
+                            impact += _wrap(f"{name}: {item.impact[k]}", w - 2 * pad, small, th)[:2]
             return _wrap(text, w - 2 * pad, small, th)[:4], impact
 
         def foot_size(lines: tuple[list[str], list[str]]) -> int:
             return (len(lines[0]) + len(lines[1])) * px(26) + (px(8) if lines[1] else 0)
 
         help_lines, impact_lines = foot(*rows[self.index])
-        # The help area is as tall as the longest help in the list, whichever row is selected, so the menu keeps its
-        # size and the rows stay where they are while the player goes up and down.
-        key = (round(ui, 3), tuple((kind, spec.key if spec else None, self.disabled(spec.key) if spec else None)
-                                   for kind, spec in rows))
-        if self._foot_key != key:
-            self._foot_key, self._foot_h = key, max(foot_size(foot(kind, spec)) for kind, spec in rows)
-        foot_h = px(18) + self._foot_h + px(46)
-        if head_h + len(rows) * row_h + foot_h > px(1040):  # many rows: closer together, so it fits the window
-            row_h = max(px(30), (px(1040) - head_h - foot_h) // len(rows))
-        h = head_h + len(rows) * row_h + foot_h
+        # The list is as long as the longest page and the help area as tall as the longest help, whatever page and row
+        # are shown, so the menu keeps its size and the rows stay where they are while the player goes through it.
+        pages = {p: self.page_rows(p) for p in [None] + self.sections()}
+        key = (round(ui, 3), tuple((p, tuple((self._row_key(r), self.disabled(r[1].key) if r[0] == "setting" else None)
+                                             for r in rs)) for p, rs in pages.items()))
+        if self._size_key != key:
+            self._size_key = key
+            self._size = (max(len(rs) for rs in pages.values()),
+                          max(foot_size(foot(*r)) for rs in pages.values() for r in rs))
+        n, foot_body = self._size
+        foot_h = px(18) + foot_body + px(46)
+        if head_h + n * row_h + foot_h > px(1040):  # many rows: closer together, so it fits the window
+            row_h = max(px(30), (px(1040) - head_h - foot_h) // n)
+        h = head_h + n * row_h + foot_h
         img = np.full((h, w, 3), BG, np.uint8)
 
-        cv2.putText(img, "Settings", (pad, px(50)), TITLE_FONT, 1.05 * ui, TEXT, th + 1, cv2.LINE_AA)
-        _text_right(img, "M / Esc to close", w - pad, px(48), small, MUTED, th)
+        title_scale = 1.05 * ui
+        if self.page is None:
+            cv2.putText(img, "Settings", (pad, px(50)), TITLE_FONT, title_scale, TEXT, th + 1, cv2.LINE_AA)
+            _text_right(img, "M / Esc to close", w - pad, px(48), small, MUTED, th)
+        else:  # Settings > Smoothness
+            x = pad
+            for part, color in (("Settings  >  ", MUTED), (self.page, TEXT)):
+                cv2.putText(img, part, (x, px(50)), TITLE_FONT, title_scale, color, th + 1, cv2.LINE_AA)
+                x += cv2.getTextSize(part, TITLE_FONT, title_scale, th + 1)[0][0]
+            _text_right(img, "Esc: back", w - pad, px(48), small, MUTED, th)
         cv2.line(img, (pad, head_h - px(10)), (w - pad, head_h - px(10)), RULE, max(1, px(1.5)))
 
-        for i, (kind, spec) in enumerate(rows):
+        for i, (kind, item) in enumerate(rows):
             y0 = head_h + i * row_h
             base = y0 + int(row_h * 0.66)
             selected = i == self.index
@@ -141,6 +212,13 @@ class Menu:
                 cv2.putText(img, f"Restart now  (applies: {reasons})", (pad, base), FONT, fs, ACCENT, th,
                             cv2.LINE_AA)
                 continue
+            if kind == "section":
+                if i and rows[i - 1][0] == "setting":  # the quick picks above, the sections below
+                    cv2.line(img, (pad, y0), (w - pad, y0), RULE, max(1, px(1.5)))
+                cv2.putText(img, item, (pad, base), FONT, fs, TEXT, th, cv2.LINE_AA)
+                _text_right(img, ">", w - pad, base, fs, ACCENT if selected else MUTED, th)
+                continue
+            spec = item
             off = self.disabled(spec.key) is not None
             color = DIM if off else TEXT
             cv2.putText(img, spec.label, (pad, base), FONT, fs, color, th, cv2.LINE_AA)
@@ -162,7 +240,7 @@ class Menu:
             else:
                 _text_right(img, value, right - (px(30) if not off else 0), base, fs, MUTED if not off else DIM, th)
 
-        y = head_h + len(rows) * row_h
+        y = head_h + n * row_h
         cv2.line(img, (pad, y + px(4)), (w - pad, y + px(4)), RULE, max(1, px(1.5)))
         y += px(18)
         for line in help_lines:
@@ -172,9 +250,13 @@ class Menu:
         for line in impact_lines:
             y += px(26)
             cv2.putText(img, line, (pad, y), FONT, small, IMPACT, th, cv2.LINE_AA)
-        cv2.putText(img, "Up/Down select    Left/Right change    M close    Q quit",
-                    (pad, h - px(16)), FONT, small * 0.9, DIM, th, cv2.LINE_AA)
+        cv2.putText(img, KEYS[self.page is not None], (pad, h - px(16)), FONT, small * 0.9, DIM, th, cv2.LINE_AA)
         return img
+
+
+# The keys, at the bottom: on the main page, and on a section's page
+KEYS = ("Up/Down select   Left/Right change   Enter open   M close   Q quit",
+        "Up/Down select   Left/Right change   Esc back   M close   Q quit")
 
 
 def _text_right(img: np.ndarray, text: str, right: int, base: int, scale: float, color, th: int) -> int:

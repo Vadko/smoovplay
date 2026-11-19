@@ -1110,12 +1110,13 @@ def main(argv: list[str] | None = None) -> int:
             return say({"deleted": lib.delete(a.id)})
         if a.cmd == "add-lut":
             return say({"name": lib.add_lut(a.file)})
-        import cv2
+        from .imagefile import read_image, write_image
         look = lib.get(a.look) or decode(a.look)
-        img = cv2.imread(a.src)
+        img = read_image(a.src)
         if img is None:
             return say({"error": f"couldn't read {a.src}"})
-        cv2.imwrite(a.out, render(look, img, a.frame, lib))
+        if not write_image(a.out, render(look, img, a.frame, lib)):
+            return say({"error": f"couldn't write {a.out}"})
         return say({"out": a.out})
     except ValueError as e:  # CodeError, a bad LUT, bad JSON
         return say({"error": str(e)})

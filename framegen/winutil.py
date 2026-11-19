@@ -173,6 +173,26 @@ def boost_thread(task: str = "Games") -> bool:
         return False
 
 
+_ES_SYSTEM_REQUIRED, _ES_DISPLAY_REQUIRED, _ES_CONTINUOUS = 0x1, 0x2, 0x80000000
+
+
+def keep_screen_on(on: bool = True) -> bool:
+    """While the video plays, Windows doesn't turn the screen off or sleep, as video players and games ask. Without
+    it, the power plan's "Turn off display after" (15 minutes, often) blanks the screen mid-game, because a controller
+    isn't input to Windows: only a keyboard or a mouse is (chiaki-ng only asks on Linux). Lasts until the calling
+    thread ends or calls again with on=False. Returns whether it worked."""
+    if sys.platform != "win32":
+        return False
+    try:
+        k32 = ctypes.WinDLL("kernel32")
+        k32.SetThreadExecutionState.restype = ctypes.c_uint32
+        k32.SetThreadExecutionState.argtypes = [ctypes.c_uint32]
+        flags = _ES_CONTINUOUS | (_ES_DISPLAY_REQUIRED | _ES_SYSTEM_REQUIRED if on else 0)
+        return k32.SetThreadExecutionState(flags) != 0
+    except OSError:
+        return False
+
+
 def boost_gpu() -> bool:
     """Raises this process's GPU scheduling priority to high (what games and video players use), so other
     programs' GPU work doesn't delay ours. Returns whether it worked."""

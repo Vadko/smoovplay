@@ -45,6 +45,11 @@ namespace SmoovPlay
         [STAThread]
         static int Main(string[] args)
         {
+            // Tooltips as before .NET Framework 4.8's WCAG 2.1 ones, which stay open while the mouse is between a
+            // tooltip's owner and the tooltip (so it can get onto it). Ours open below the mouse and run to the right,
+            // over the next buttons in a row (the Settings page's choices: AMD FSR 1, NVIDIA RTX VSR, Bilinear), so
+            // moving along a row kept showing the first button's tooltip. First thing: WPF keeps the value it reads first.
+            AppContext.SetSwitch("Switch.System.Windows.Controls.ToolTip.OptOutOfWCAG21ToolTipBehavior", true);
             ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
             var opts = Options.Parse(args);
             if (args.Length == 2 && args[0] == "--check-signature")  // testing the Visual C++ download check
@@ -271,6 +276,8 @@ namespace SmoovPlay
         public void Run()
         {
             Log($"SmoovPlay {BuildInfo.Version} setup, {DateTime.Now:yyyy-MM-dd HH:mm:ss}, into {p.Install}");
+            if (p.Install.Any(c => c > 127))  // (diagnostics hide the user's name, which can be where they are)
+                Log("Note: the install folder's path has letters outside English A-Z. If a step fails, a folder like C:\\SmoovPlay is worth a try.");
             Directory.CreateDirectory(p.Install);
             Directory.CreateDirectory(p.Runtime);
             if (File.Exists(p.Ready)) File.Delete(p.Ready);
@@ -692,6 +699,8 @@ namespace SmoovPlay
                 WorkingDirectory = p.Dev ? p.App : Path.GetDirectoryName(p.Chiaki),
             };
             psi.EnvironmentVariables["CHIAKI_FRAMETAP"] = "1";
+            string renderer = Renderer(psi.EnvironmentVariables["CHIAKI_FRAMETAP_RENDERER"]);
+            if (renderer != null) psi.EnvironmentVariables["CHIAKI_FRAMETAP_RENDERER"] = renderer;
             var pr = Process.Start(psi);
             try
             {
@@ -699,8 +708,22 @@ namespace SmoovPlay
                 File.WriteAllText(Marker(p), pr.Id + " " + pr.StartTime.Ticks);
             }
             catch (Exception) { }
-            log("[launcher] started chiaki-ng");
+            log("[launcher] started chiaki-ng" + (renderer == "opengl"
+                ? " (drawing with OpenGL this time: chiaki-ng's Vulkan has crashed on AMD and Intel graphics; SmoovPlay shows the picture)"
+                : ""));
             return true;
+        }
+
+        /// <summary>What chiaki-ng draws its own window with (CHIAKI_FRAMETAP_RENDERER, our chiaki-ng's switch, for that
+        /// session only): OpenGL without an NVIDIA card, where chiaki-ng's default, Vulkan (with Vulkan decoding), has
+        /// crashed (issue 19, a Radeon RX 9070 XT). SmoovPlay draws the stream itself, so chiaki-ng's window, hidden
+        /// behind it, loses nothing. On NVIDIA it stays as set: Vulkan works there, and an HDR stream needs it. One set
+        /// already (e.g. "vulkan" to try it anyway) is kept.</summary>
+        public static string Renderer(string already)
+        {
+            if (!string.IsNullOrEmpty(already)) return already;
+            if (SystemCheck.GpuName == "unknown" && SystemCheck.OtherGpu == null) SystemCheck.QueryGpu();
+            return SystemCheck.GpuName == "unknown" && SystemCheck.OtherGpu != null ? "opengl" : null;
         }
 
         public static void Close(Process[] procs)
@@ -1165,9 +1188,11 @@ namespace SmoovPlay
                 OnState(PlayState.Playing, null);
             else if (line.StartsWith("[chiaki] this stream was already running"))
                 OnNote("This stream started before SmoovPlay. In chiaki-ng, end the stream and connect again.");
-            else if (line.StartsWith("[chiaki] WARNING:"))
-                OnNote(line.Substring("[chiaki] WARNING:".Length).Trim());
-            else if (line.StartsWith("[chiaki] stream ended"))
+            else if (line.StartsWith("[tap] this stream was already running"))  // another app's compressed frames
+                OnNote("This stream started before SmoovPlay. Restart the stream in the app.");
+            else if (line.StartsWith("[chiaki] WARNING:") || line.StartsWith("[tap] WARNING:"))
+                OnNote(line.Substring(line.IndexOf("WARNING:") + "WARNING:".Length).Trim());
+            else if (line.StartsWith("[chiaki] stream ended") || line.StartsWith("[tap] the app stopped sending frames"))
                 streamEnded = true;
             else if (line.StartsWith("[window-keys] "))
                 OnWindowKeys(line.Substring("[window-keys] ".Length));
@@ -1240,6 +1265,18 @@ namespace SmoovPlay
 
     static class Diagnostics
     {
+        static void AppendLog(StringBuilder sb, string logFile, int max)
+        {
+            string[] lines;
+            using (var fs = new FileStream(logFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (var sr = new StreamReader(fs))
+                lines = sr.ReadToEnd().Split('\n');
+            int n = Math.Min(max, lines.Length);
+            sb.AppendLine($"Log {Path.GetFileName(logFile)}, last {n} lines:");
+            foreach (var l in lines.Skip(lines.Length - n))
+                sb.AppendLine(l.TrimEnd('\r'));
+        }
+
         public static string Collect(Paths p, string lastLog)
         {
             var sb = new StringBuilder();
@@ -1264,7 +1301,9 @@ namespace SmoovPlay
                 if (!AppWindows.Loaded && p.RuntimeReady) AppWindows.Load(p);
                 sb.Append(AppWindows.Summary());
             }
-            sb.AppendLine("Install: " + p.Install + (p.Dev ? " (dev)" : ""));
+            // (The user's name is taken out below: a path like C:\Users\<name with Chinese letters> would look fine.)
+            sb.AppendLine("Install: " + p.Install + (p.Dev ? " (dev)" : "")
+                          + (p.Install.Any(c => c > 127) ? " (the path has letters outside English A-Z)" : ""));
             sb.AppendLine("Runtime: " + (File.Exists(p.Ready) ? File.ReadAllText(p.Ready).Trim() : "not ready"));
             sb.AppendLine("chiaki-ng: " + (Chiaki.Ours(p) != null ? "running (started by SmoovPlay)" : "not started by SmoovPlay")
                           + $", {Chiaki.Others(p).Length} other chiaki-ng running");
@@ -1274,15 +1313,16 @@ namespace SmoovPlay
             if (logFile == null && Directory.Exists(p.Logs))
                 logFile = new DirectoryInfo(p.Logs).GetFiles("*.log").OrderByDescending(f => f.LastWriteTime).Select(f => f.FullName).FirstOrDefault();
             if (logFile != null && File.Exists(logFile))
+                AppendLog(sb, logFile, 200);
+            // Copied after setup (its log is the launcher's last): the newest game session's log too, which is what a
+            // report about playing needs, or a note that there's none yet
+            if (logFile == null || Path.GetFileName(logFile).StartsWith("setup-", StringComparison.OrdinalIgnoreCase))
             {
-                string[] lines;
-                using (var fs = new FileStream(logFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-                using (var sr = new StreamReader(fs))
-                    lines = sr.ReadToEnd().Split('\n');
-                int n = Math.Min(200, lines.Length);
-                sb.AppendLine($"Log {Path.GetFileName(logFile)}, last {n} lines:");
-                foreach (var l in lines.Skip(lines.Length - n))
-                    sb.AppendLine(l.TrimEnd('\r'));
+                string session = Directory.Exists(p.Logs)
+                    ? new DirectoryInfo(p.Logs).GetFiles("session-*.log").OrderByDescending(f => f.LastWriteTime).Select(f => f.FullName).FirstOrDefault()
+                    : null;
+                if (session != null) AppendLog(sb, session, 200);
+                else sb.AppendLine("No game session log yet: after playing, press Copy diagnostics again.");
             }
             string results = LatestResults(p);
             if (results != null)

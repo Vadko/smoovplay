@@ -888,6 +888,7 @@ namespace SmoovPlay
                 try { dir = ResolveDir(raw, out sub); problem = SystemCheck.FolderProblem(dir, out tooLong); }
                 catch (Exception e) { problem = e.Message; }
             }
+            if (problem == null && dir != null) problem = SystemCheck.WriteProblem(dir);
             string root = SafeRoot(raw);
             double free = 0, total = 0;
             try
@@ -1324,6 +1325,7 @@ namespace SmoovPlay
             BuildSources();
             if (!changed) return;
             checks = null;  // the PC check's last card depends on the source
+            if (settingRows.Count > 0) RefreshSettings();  // settings only used with some sources (Spec.sources)
             if (playState == PlayState.Idle) SetPlayState(PlayState.Idle, null);
             Show(B("BtnPlayTest"), !(session != null && session.Running) && source.TestMode);
             if (page == "PageGuide") BuildGuide();
@@ -1820,6 +1822,7 @@ namespace SmoovPlay
             }
             if (over && changed) BringBack();
             if (over && changed) { liveState = null; restartSent = false; BuildChips(); }
+            if (over && changed && detectAfterPlay && !detecting) { detectAfterPlay = false; RunDetect(); }  // (Vfg.cs)
             RefreshSettings();
             OnLooksState();
             UpdateTaskbar(st, title);
@@ -1943,7 +1946,7 @@ namespace SmoovPlay
         {
             new[] { "capture-wire", "Connect the card", "The console's HDMI output goes into the card's HDMI input, and the card into this PC: USB 3 (a blue port) or a PCIe slot. A card with an HDMI output can pass the picture on to your TV too.", null },
             new[] { "capture-hdcp", "Turn off HDCP on a PS5", "On the PS5: Settings → System → HDMI → turn off Enable HDCP. With it on, the card only gets a blank picture. Turn it back on when you're done: video apps like Netflix need it. Xbox and Switch games don't need this.", null },
-            new[] { "capture-mode", "1080p, 60 Hz, HDR off", "Set the console's video output to 1080p at 60 Hz, with HDR off. SmoovPlay expects a 60 Hz signal, in which a 30 fps game shows each frame twice.", null },
+            new[] { "capture-mode", "1080p, 60 Hz, HDR off", "Set the console's video output to 1080p at 60 Hz, with HDR off. SmoovPlay expects a 60 Hz signal, in which a 30 fps game shows each frame twice. Picked a higher Capture card resolution in Settings (Experimental)? Set the console to that instead.", null },
             new[] { "capture-sound", "Sound and controller", "Your controller stays connected to the console as usual. SmoovPlay plays the card's sound on this PC, held back to meet the smooth picture. If you'd rather listen through the card's HDMI output, pick no sound for the card on the Play page.", null },
             new[] { "capture-play", "Press Play", "The smooth video from the card opens in its own window.", "play" },
         };

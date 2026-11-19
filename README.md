@@ -12,6 +12,7 @@
 
 <p align="center">
   <a href="https://github.com/smoovplay/smoovplay/releases/latest"><b>⬇ Download for Windows</b></a>
+  &nbsp;·&nbsp; <a href="https://smoovplay.github.io/"><b>🌐 Website</b></a>
   &nbsp;·&nbsp; <a href="https://smoovplay.github.io/compare/"><b>▶ Watch it at full frame rate</b></a>
   &nbsp;·&nbsp; <a href="#what-it-does">What it does</a>
   &nbsp;·&nbsp; <a href="#get-it">Install</a>
@@ -21,6 +22,7 @@
 
 <p align="center">
   <a href="https://github.com/smoovplay/smoovplay/releases"><img alt="Status: early release" src="https://img.shields.io/badge/status-early%20release-FFB02E?style=flat-square"></a>
+  <a href="https://github.com/smoovplay/smoovplay/releases"><img alt="Downloads of SmoovPlay-Setup.exe, all releases" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fsmoovplay%2Fsmoovplay%2Fstats%2Fdownloads.json&style=flat-square"></a>
   <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-3A4250?style=flat-square">
   <img alt="Graphics: NVIDIA RTX 30, 40 or 50 series; AMD and Intel as an Experimental option" src="https://img.shields.io/badge/GPU-NVIDIA%20RTX%2030%20%7C%2040%20%7C%2050%2C%20AMD%20%26%20Intel%20experimental-3A4250?style=flat-square">
   <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/licence-MIT-3A4250?style=flat-square"></a>
@@ -41,6 +43,9 @@ SmoovPlay streams your console to your PC, where your graphics card draws new fr
 sends, live. A 30 fps game plays at **60, 90 or up to 120 fps** to match your screen, sharpened to fit it.
 There's nothing to install on the console, and it's free and open source.
 
+**New here?** The website, [smoovplay.github.io](https://smoovplay.github.io/), shows what it does and
+[how it works](https://smoovplay.github.io/how-it-works/), with a step-by-step start and an FAQ.
+
 ## What it does
 
 <p align="center">
@@ -48,9 +53,12 @@ There's nothing to install on the console, and it's free and open source.
 </p>
 
 - **Up to four times the frames.** RIFE, an open-source AI model, draws 1, 2 or 3 new frames between each pair the
-  game sends, in about 9 ms each on an RTX 4070 Ti SUPER.
-- **Sharper on big screens.** The 1080p stream is sharpened and scaled to your monitor by AMD FSR 1 (in 0.1 ms)
-  or NVIDIA RTX Video Super Resolution.
+  game sends, in about 9 ms each on an RTX 4070 Ti SUPER (one 1080p in-between frame from RIFE 4.22 lite, timed on
+  its own). In live PS5 play at 90 fps, the work for each real frame's two in-between frames took 17.6 ms (median),
+  upload and all.
+- **Sharper on big screens.** The 1080p stream is sharpened and scaled to your monitor by AMD FSR 1 (in 0.1 ms),
+  or by NVIDIA RTX Video Super Resolution (Experimental), which comes with NVIDIA VFG's download on RTX 40 and 50
+  series cards.
 - **Works with what you have.** A PS5 streams over Remote Play on your home network, through the open-source chiaki-ng,
   and your controller connects to the PC. An Xbox through its app, or any console through a capture card, are
   Experimental options.
@@ -65,18 +73,24 @@ There's nothing to install on the console, and it's free and open source.
 
 | | Status |
 |---|---|
-| **PS5**, over Remote Play | **Tested.** The recommended way. |
-| **NVIDIA GeForce RTX 30, 40 and 50 series** | **Tested** on an RTX 4070 Ti SUPER. RTX 20 cards and laptops aren't tested yet. |
-| **Xbox and other streaming apps**, by capturing the app's window | *Experimental.* Tested with a stand-in window, not the Xbox app yet. |
-| **Any console over HDMI**, through a capture card | *Experimental.* Tested with recordings standing in for a card. |
-| **HDR** from a PS5 (from 0.2.0) | *Experimental.* Tested with a real PS5 HDR stream on an HDR monitor. On by itself (Auto) when Windows' HDR is on. Not yet with a capture card. |
+| **PS5**, over Remote Play | **Tested** with real games, including ones locked at 30 fps like Gotham Knights. The recommended way. |
+| **NVIDIA GeForce RTX 30, 40 and 50 series** | **Tested** on an RTX 4070 Ti SUPER (Windows 10), and by a contributor on an RTX 5070 Ti (Windows 11). RTX 20 cards and laptops aren't tested yet. |
+| **Any console over HDMI**, through a capture card | *Experimental.* A player's AVerMedia Live Gamer 4K (GC573) works since 0.3.1; its sound came in 0.3.2, waiting on their word. Other cards are tested with recordings standing in for one. |
+| **HDR** from a PS5 | *Experimental.* A contributor has played a real PS5 HDR stream with HDR all the way to an HDR monitor. Since 0.3.2, fullscreen keeps Windows' HDR on. On by itself (Auto, the default) when Windows' HDR is on. |
+| **Xbox and other streaming apps**, by capturing the app's window | *Experimental.* Recognises the current Xbox app since 0.3.1, from a player's report; a real Xbox stream isn't confirmed yet. |
 | **AMD Radeon and Intel Arc**, through DirectML | *Experimental.* The same frames, about 1.7× more slowly. Not on a real card yet. |
+
+**How it's checked:** each release passes SmoovPlay's automated tests (340 for 0.3.2, with a stand-in PS5 stream,
+stand-in capture cards and stand-in HDR frames) and installs as an update over the previous version before it ships.
+Real-hardware results come from the developer's PC, contributors and player reports, and the table says which. The
+comparison clips are labelled simulated (a recording played as a stream) or live (captured from real play).
+Updates are signed: an installed copy checks SmoovPlay's signature before it runs one.
 
 ## Get it
 
 > [!NOTE]
 > **Early release:** expect rough edges, and please [report them](#help-test-it).
-> SmoovPlay offers new versions itself, and updates in one click.
+> SmoovPlay offers new versions itself, and updates in one click (or click **Check for updates** in the launcher).
 
 | You need | |
 |---|---|
@@ -143,8 +157,12 @@ must carry SmoovPlay's signature before they run.
 | **R** · **B** | Save the instant replay · a before & after video (**Ctrl+Alt+R** · **Ctrl+Alt+B** from any window) |
 | **K** · **J** | Look off and on · next look (**Shift+J** goes back) |
 | **S** · **U** | Stats overlay (off, minimal, detailed) · next upscaler |
+| **Z** | Fill an ultrawide screen: Fit, Zoom, Stretch or Panorama. Consoles send 16:9 only, so these crop or stretch the same picture: there's no more of the game to show |
 | **L** | Delay test (PS5 Remote Play) |
 | **Esc** or **Q** | Stop |
+
+Capturing an app's window? The app keeps the keyboard, so SmoovPlay's keys use Ctrl+Alt there: **Ctrl+Alt+M** menu,
+**Ctrl+Alt+F** fullscreen, **Ctrl+Alt+Esc** stop. You can change them on the Play page.
 
 ## How it works
 
@@ -170,16 +188,27 @@ The timeline shows 90 fps. At 60 fps there's one AI frame between each pair of r
 - **Smoother, not faster.** The extra frames are generated: motion gets smoother, but the game still responds like
   30 fps, and a little later than without SmoovPlay. Great for driving, exploring and story missions; not for
   competitive online play.
-- **About 36 ms of delay at 90 fps** (about 20 ms at 60 fps), on top of Remote Play's own. About 22 ms of it is the
-  wait every frame generator has: each real frame is held back while the in-between frames before it are shown.
-  Press **L** in the video window to measure your setup.
+- **About 36 ms of delay at 90 fps** (about 20 ms at 60 fps), on top of Remote Play's own. SmoovPlay times every
+  frame itself, from reaching SmoovPlay to being on screen: in live play of a 30 fps PS5 game over Ethernet, the
+  median was 35.4 and 35.8 ms in two sessions. The 60 fps figure comes from a recorded clip. About
+  22 ms of it is the wait every frame generator has: each real frame is held back while the in-between frames before
+  it are shown. The console, the network and your screen add their own delay; press **L** in the video window for
+  the delay test, which times button presses all the way to the screen.
+- **60 and 90 fps are what's been shown and measured live.** 120 fps works the same way, with three in-between
+  frames, but no 120 fps clip or live measurement is published yet.
 - **1080p.** Remote Play arrives at 1080p, so the picture is a little softer than HDMI straight from the console.
-- **HDR** (*Experimental*, from 0.2.0: Settings → HDR, **Auto** by default). With **Use HDR** on in Windows'
-  display settings, SmoovPlay picks chiaki-ng's H.265 HDR codec by itself and keeps a PS5's HDR all the way to your
-  monitor, with Looks and RTX VSR off; on any other display it asks the PS5 for SDR. Turn on HDR on the PS5 too
-  (Settings → Screen and Video → Video Output → HDR). **On, shown in SDR** fits an HDR stream to any monitor, and
-  **Off** leaves chiaki-ng's codec as you set it. Tried with a real PS5 HDR stream on an HDR monitor (Windows 11, RTX
-  5070 Ti); not yet with a capture card, which stays SDR. Instant replay clips are saved in SDR either way.
+- **HDR** (*Experimental*, Settings → HDR, **Auto** by default). With **Use HDR** on in Windows' display settings,
+  Auto picks chiaki-ng's H.265 HDR codec and keeps a PS5's HDR all the way to your monitor, with Looks and RTX VSR
+  off. Turn on HDR on the PS5 too (Settings → Screen and Video → Video Output → HDR). On a display without HDR, an
+  HDR stream is fitted to it, and chiaki-ng's codec is left as it is. **On, shown in SDR** always fits HDR to the
+  monitor, and **Off** leaves HDR and chiaki-ng's codec alone. A contributor has played a real PS5 HDR stream on an
+  HDR monitor, and since 0.3.2 fullscreen keeps Windows' HDR on instead of switching the display to SDR. Instant
+  replay clips are saved in SDR either way.
+- **A game locked at 30 fps looks uneven?** Set Settings → Smoothness → **Game frame rate** to **30 fps**. On Auto,
+  SmoovPlay works the rate out from the stream as it plays. Since 0.3.4 it goes by the picture and rarely misreads a
+  30 fps game over a wired connection, but a still or dark scene can still fool it.
+- **Wired is smoothest.** On Wi-Fi, frames can arrive late and in bunches, which shows as hitches however fast your
+  PC is. Plug the PS5 and the PC into the router if you can.
 - **Some wobble.** HUD text over fast motion, very fast camera turns and thin objects crossing each other can wobble
   a little. Press **I** to compare with frame generation off.
 - **Sound stays in step.** chiaki-ng holds the sound back by as long as the picture spends in SmoovPlay.
@@ -187,6 +216,9 @@ The timeline shows 90 fps. At 60 fps there's one AI frame between each pair of r
   [test mode](#only-have-60-fps-games-use-test-mode).
 - **Games between 40 and 60 fps** stutter over a 60 Hz stream. **Even out 40-60 fps** (on by default, Experimental)
   spaces their frames evenly, for about one frame (17 ms) more delay.
+- **30 fps games that dip below 30** freeze for a moment and jump at each dip. **Dip smoothing** (off by default,
+  Experimental) spaces their frames by when they arrived, so a dip looks like a brief slow-down. It's only on while
+  the game dips, and adds about 17 to 50 ms of delay and more graphics card work then.
 - **One frame generator at a time.** Leave NVIDIA Smooth Motion, AMD Fluid Motion Frames and Lossless Scaling off
   for SmoovPlay and chiaki-ng. Your other games aren't affected.
 
@@ -197,8 +229,9 @@ SmoovPlay is new, so finding what breaks is the most useful help right now:
 - **Your graphics card:** which does it hold, 60, 90 or 120 fps?
 - **Other games:** anything with a 30 fps Quality or Fidelity mode, or one that runs between 40 and 60 fps.
 - **Your setup:** Wi-Fi or wired, and your monitor's refresh rate.
-- **The Experimental options:** an Xbox through the Xbox app, a capture card, another app's window, or an AMD or
-  Intel card. None has met the real hardware yet, so any report helps, even "it didn't start".
+- **The Experimental options:** an Xbox through the Xbox app, a capture card, HDR on your monitor, another app's
+  window, or an AMD or Intel card. Most have met only one or two real setups so far, so any report helps, even "it
+  didn't start".
 
 Report bugs and feedback in [Issues](https://github.com/smoovplay/smoovplay/issues). In the app, **Help → Copy
 diagnostics** copies your PC and settings details: paste them in with the game and what happened.
@@ -242,8 +275,12 @@ page after playing.
 
 As Experimental options. For any console with HDMI, pick **Capture card** on the Play page. For Xbox, pick **App
 window**: SmoovPlay captures the window of the app you stream with (the Xbox app, Sony's PS Remote Play app,
-Moonlight or a cloud game in a browser) and shows the smooth picture over it. Neither has been tried with the real
-thing yet, so please [send feedback](#help-test-it).
+Moonlight or a cloud game in a browser) and shows the smooth picture over it. A player's AVerMedia Live Gamer 4K
+works; the Xbox app and other cards are waiting on reports, so please [send feedback](#help-test-it).
+
+A capture card is read at 1080p by default. **Capture card resolution** (Settings, Picture) can ask for 1440p or 4K,
+which is sharper on a screen that big, but every new frame is drawn at that size: 1440p is about twice the work of
+1080p (60 fps on most cards), 4K about four times. Both can run quite sluggish.
 </details>
 
 <details>
@@ -259,8 +296,9 @@ and walks you through connecting your console.
 <summary><b>What is NVIDIA VFG?</b></summary>
 
 An optional second AI model for RTX 40 and 50 series cards: NVIDIA's own Video Frame Generation. It isn't part of
-SmoovPlay. **Set up NVIDIA VFG** on the Settings page downloads it from NVIDIA, only once you accept NVIDIA's
-licence. [More in the developer docs](docs/DEVELOPING.md#nvidia-vfg).
+SmoovPlay. **Set up NVIDIA VFG** on the Settings page, or in Auto-detect's results on an RTX 40 or 50 series card,
+downloads it from NVIDIA, only once you accept NVIDIA's licence. The same download brings NVIDIA RTX Video Super
+Resolution, an AI upscaler (Settings → Picture → Upscaler). [More in the developer docs](docs/DEVELOPING.md#nvidia-vfg).
 </details>
 
 <details>
@@ -303,6 +341,9 @@ py -3.12 -m venv .venv
 replay and Looks work inside, the scheduler, upscaling, NVIDIA VFG, measured results and known limits.
 
 ## Credits and licences
+
+Thanks to everyone who has reported issues and sent fixes: see the
+[contributors](https://github.com/smoovplay/smoovplay/graphs/contributors) and the [changelog](CHANGELOG.md).
 
 RIFE by hzwer ([Practical-RIFE](https://github.com/hzwer/Practical-RIFE), MIT). Model definitions and weights
 from [vs-rife](https://github.com/HolyWu/vs-rife) by HolyWu (MIT). FSR 1 shaders by AMD

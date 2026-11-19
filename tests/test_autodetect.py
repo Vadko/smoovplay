@@ -1,5 +1,7 @@
 """Auto-detect's choices (framegen.autodetect.recommend) for made-up PCs. No GPU needed."""
-from framegen.autodetect import Display, recommend
+import re
+
+from framegen.autodetect import Display, recommend, vfg_offer
 from framegen.settings import BY_KEY, SPECS
 
 DEFAULTS = {s.key: s.default for s in SPECS}
@@ -105,3 +107,55 @@ def test_hdr_choices_made_on_purpose_are_kept():
 def test_busy_card_note():
     assert any("busy" in n for n in pick(busy=85)["notes"])
     assert not any("busy" in n for n in pick(busy=3)["notes"])
+
+
+def test_rtx_40_and_50_cards_without_vfg_are_offered_it():
+    text = vfg_offer(True, "NVIDIA GeForce RTX 5070 Ti", "621.24")
+    assert text.startswith("Your RTX 5070 Ti can also run NVIDIA VFG")
+    assert "NVIDIA's licence" in text and "Auto-detect times it" in text
+    assert "driver" not in text  # new enough
+    assert not re.search(r"\d ?ms\b", text) and "faster" not in text  # NVIDIA's licence: no speed or quality claims
+
+
+def test_vfg_offer_asks_for_a_newer_driver_first():
+    assert "570.65 or newer, and this PC has 566.36" in vfg_offer(True, "NVIDIA GeForce RTX 4070", "566.36")
+    assert "driver" not in vfg_offer(True, "NVIDIA GeForce RTX 4070", "570.65")
+    assert "driver" not in vfg_offer(True, "NVIDIA GeForce RTX 4070", None)  # unknown: VFG itself will say
+    assert "driver" not in vfg_offer(True, "NVIDIA GeForce RTX 4070", "r570")
+
+
+def test_no_vfg_offer_when_set_up_or_the_card_cant_run_it():
+    # not_set_up is False when it's set up, on RTX 20/30 cards, without an NVIDIA card, or when the check failed
+    assert vfg_offer(False, "NVIDIA GeForce RTX 3080", "621.24") == ""
+    assert vfg_offer(False, "NVIDIA GeForce RTX 5070 Ti", "621.24") == ""
+
+
+def _detect_on(monkeypatch, vfg_why: str, driver: str = "621.24") -> dict:
+    """detect() on a made-up PC (no GPU used): an RTX 4070 whose VFG state is vfg_why."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from framegen import autodetect, rtxvsr, trt, vfg
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda i=0: "NVIDIA GeForce RTX 4070")
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda i=0: SimpleNamespace(total_memory=12 * 2**30))
+    monkeypatch.setattr(autodetect, "primary_display", lambda: UW120)
+    monkeypatch.setattr(autodetect, "nvidia_smi", lambda samples=3: {"driver": driver, "busy": 0})
+    monkeypatch.setattr(trt, "trt_available", lambda: True)
+    monkeypatch.setattr(rtxvsr, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(vfg, "vfg_unavailable", lambda: vfg_why)
+    return autodetect.detect(DEFAULTS, log=lambda m: None, timing=THIS_PC)
+
+
+def test_detect_offers_vfg_only_where_it_can_be_set_up(monkeypatch):
+    from framegen.vfg import NOT_SET_UP
+    r = _detect_on(monkeypatch, NOT_SET_UP)
+    assert r["vfg_offer"].startswith("Your RTX 4070 can also run NVIDIA VFG") and r["vfg_offer_ready"] is True
+    assert next(f for f in r["found"] if f["label"] == "NVIDIA VFG")["detail"] == "Optional: see below."
+    r = _detect_on(monkeypatch, NOT_SET_UP, driver="566.36")  # too old: offered, but the button waits for the driver
+    assert "566.36" in r["vfg_offer"] and r["vfg_offer_ready"] is False
+    for why in ("NVIDIA VFG needs an RTX 40 or 50 series card.", "No NVIDIA graphics card was found.",
+                "NVIDIA VFG couldn't be checked: boom"):
+        r = _detect_on(monkeypatch, why)
+        assert "vfg_offer" not in r and "vfg_offer_ready" not in r, why
