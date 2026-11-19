@@ -137,6 +137,7 @@ class FrameInfo:
     matrix: int = SPC_BT2020_NCL
     transfer: int = TRC_PQ
     primaries: int = PRI_BT2020
+    tagged: bool = True  # the frame said its transfer; False: taken from its bit depth (describe() says so)
 
     @property
     def hdr(self) -> bool:
@@ -147,13 +148,14 @@ class FrameInfo:
         """From a PyAV frame. Untagged 10-bit HEVC from a PS5 in HDR mode is HDR10; untagged 8-bit is BT.709."""
         trc, pri, spc = fr.color_trc, fr.color_primaries, fr.colorspace
         hdr_default = bits > 8
-        if trc not in (TRC_PQ, TRC_HLG, TRC_BT709, 6, 14, 15):  # unknown or unspecified
+        tagged = trc in (TRC_PQ, TRC_HLG, TRC_BT709, 6, 14, 15)
+        if not tagged:  # unknown or unspecified
             trc = TRC_PQ if hdr_default else TRC_BT709
         if pri not in (PRI_BT709, PRI_BT2020, 5, 6):
             pri = PRI_BT2020 if trc in (TRC_PQ, TRC_HLG) else PRI_BT709
         if spc not in KR_KB and spc not in (5, 6):
             spc = SPC_BT2020_NCL if pri == PRI_BT2020 else SPC_BT709
-        return cls(bits, fr.color_range == RANGE_FULL, spc, trc, pri)
+        return cls(bits, fr.color_range == RANGE_FULL, spc, trc, pri, tagged)
 
 
 def yuv_to_rgb(y: torch.Tensor, u: torch.Tensor, v: torch.Tensor, info: FrameInfo) -> torch.Tensor:
@@ -489,4 +491,5 @@ class StreamConverter:
             return "no frame yet"
         trc = {TRC_PQ: "PQ", TRC_HLG: "HLG"}.get(i.transfer, "SDR gamma")
         pri = {PRI_BT2020: "BT.2020", PRI_BT709: "BT.709"}.get(i.primaries, f"primaries {i.primaries}")
-        return f"{i.bits}-bit {trc} {pri}{' full range' if i.full_range else ''}"
+        guessed = "" if i.tagged else f" (no colour tags: taken as {'HDR10' if i.hdr else 'SDR'})"
+        return f"{i.bits}-bit {trc} {pri}{' full range' if i.full_range else ''}{guessed}"
