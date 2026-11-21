@@ -280,17 +280,9 @@ class HdrWatch:
                 s, tone = self.card.input_status(), self.card.tone_mapping()
             except Exception:  # noqa: BLE001 - the card went away: keep the last answer
                 continue
-            if tone is not None and tone != self.tone_mapping:
-                if tone and self._restore is not None and self.card.set_tone_mapping(False):
-                    # we keep it off for HDR output, and something turned it on: Elgato's app, or the SmoovPlay
-                    # before this one putting it back as it closed after this one had started (seen: the launcher
-                    # starts the next session a moment before the last one has closed)
-                    _remember_restore(True)
-                    self.log("[capture] something turned the card's own HDR tone mapping back on: off again, for "
-                             "HDR output")
-                else:
-                    self.tone_mapping = tone
-                    self.log(f"[capture] the card's own HDR tone mapping was turned {'on' if tone else 'off'}")
+            if tone is not None and tone != self.tone_mapping:  # (Elgato's app switched it: frames follow)
+                self.tone_mapping = tone
+                self.log(f"[capture] the card's own HDR tone mapping was turned {'on' if tone else 'off'}")
             if s is not None and s.signal:
                 if s.hdr != self.status.hdr:
                     self.log(f"[capture] the console switched to {'HDR' if s.hdr else 'SDR'}")
@@ -301,8 +293,9 @@ class HdrWatch:
                 self.log(f"[capture] the picture is now read as {'HDR10' if hdr else 'SDR'}")
 
     def _put_back(self, tries: int = 6, wait_s: float = 0.5) -> bool:
-        """The tone mapping back as keep_hdr found it, checked, a few times if the card doesn't take it at once (once
-        it didn't, as a game closed). If it still won't, the note on disk has the next open() put it back."""
+        """The tone mapping back as keep_hdr found it, checked, a few times if the card doesn't take it at once (a
+        USB device can be busy for a moment as its video stops). If it still won't, the note on disk has the next
+        open() put it back."""
         if self._restore is None:
             return True
         for i in range(tries):

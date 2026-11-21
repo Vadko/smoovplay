@@ -246,21 +246,6 @@ def test_a_smoovplay_that_couldnt_put_it_back_is_made_good_next_time(restore_not
     assert any("as an earlier SmoovPlay left it off" in line for line in logs)
 
 
-def test_tone_mapping_turned_back_on_mid_game_is_turned_off_again(restore_note):
-    """While SmoovPlay keeps it off for HDR output, something turns it on: the SmoovPlay before this one putting it
-    back as it closed a moment after this one started (as happened through the launcher), or Elgato's app. Off
-    again, frames stay HDR10, and it's still put back at close."""
-    card, logs = FakeCard([HDR_ON], tone=True), []
-    watch = elgato.HdrWatch(card, HDR_ON, tone_mapping=True, poll_s=0.005, log=logs.append)
-    assert watch.keep_hdr()
-    card.tone = True
-    wait_until(lambda: card.tone is False)
-    assert watch() is True and card.writes == [False, False] and restore_note.read_text() == "1"
-    watch.close()
-    assert card.tone is True and not restore_note.exists()
-    assert any("off again, for HDR output" in line for line in logs)
-
-
 def test_tone_mapping_turned_on_by_elgatos_app_mid_game():
     card, logs = FakeCard([HDR_ON]), []
     watch = elgato.HdrWatch(card, HDR_ON, poll_s=0.005, log=logs.append)
