@@ -24,10 +24,13 @@ same screen to about 2 codes in 1023; with it on, read as HDR10 it was a tenth a
 """
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 ELGATO = 0x0FD9
 HD60_X = {0x0082: "HD60 X", 0x008A: "HD60 X Rev. 2"}  # the "new chip" HID protocol (Elgato's IsNewDeviceType)
@@ -178,6 +181,34 @@ class Hd60x:
                 self._h = None
 
 
+# What keep_hdr changed, until it's put back: a SmoovPlay that ends without closing the card (killed, or crashed) would
+# otherwise leave the card's own tone mapping off, and other apps would get HDR from it as washed-out SDR.
+RESTORE_NOTE = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()) / "SmoovPlay" / "elgato-tone-mapping.txt"
+
+
+def _remember_restore(on: bool) -> None:
+    try:
+        RESTORE_NOTE.parent.mkdir(parents=True, exist_ok=True)
+        RESTORE_NOTE.write_text("1" if on else "0", encoding="ascii")
+    except OSError:
+        pass
+
+
+def _restore_pending() -> bool | None:
+    try:
+        text = RESTORE_NOTE.read_text(encoding="ascii").strip()
+    except OSError:
+        return None
+    return {"1": True, "0": False}.get(text)
+
+
+def _forget_restore() -> None:
+    try:
+        RESTORE_NOTE.unlink()
+    except OSError:
+        pass
+
+
 class HdrWatch:
     """Whether the card's frames are HDR10, kept up to date from the card on a thread (every POLL_S): HDR coming in
     and the card's tone mapping off. Callable: watch() -> bool. status: the input as the card last said it with a
@@ -204,6 +235,11 @@ class HdrWatch:
             return None
         if card is None:
             return None
+        pending = _restore_pending()
+        if pending is not None:  # a SmoovPlay that ended without closing the card left its tone mapping changed
+            if card.set_tone_mapping(pending):
+                _forget_restore()
+                log("[capture] put the card's own HDR tone mapping back on, as an earlier SmoovPlay left it off")
         first, tone = card.input_status(), card.tone_mapping()
         if first is None or tone is None:  # not the layout this was written for: can't tell
             card.close()
@@ -225,12 +261,14 @@ class HdrWatch:
         True when it's off."""
         if not self.tone_mapping:
             return True
+        _remember_restore(True)  # first, so a SmoovPlay that ends without closing still gets it put back
         if not self.card.set_tone_mapping(False):
+            _forget_restore()
             self.log("[capture] couldn't turn off the card's own HDR tone mapping: HDR from the console comes as SDR")
             return False
         self._restore, self.tone_mapping = True, False
         import atexit
-        atexit.register(self._put_back)  # also when SmoovPlay ends without closing the source
+        atexit.register(self._at_exit)  # also when SmoovPlay ends without closing the source
         self.hdr = self.status.hdr
         self.log("[capture] the card's own HDR tone mapping is off while SmoovPlay plays, so the console's HDR stays "
                  "HDR10 (back on when it closes)")
@@ -242,9 +280,17 @@ class HdrWatch:
                 s, tone = self.card.input_status(), self.card.tone_mapping()
             except Exception:  # noqa: BLE001 - the card went away: keep the last answer
                 continue
-            if tone is not None and tone != self.tone_mapping:  # (Elgato's app switched it)
-                self.tone_mapping = tone
-                self.log(f"[capture] the card's own HDR tone mapping was turned {'on' if tone else 'off'}")
+            if tone is not None and tone != self.tone_mapping:
+                if tone and self._restore is not None and self.card.set_tone_mapping(False):
+                    # we keep it off for HDR output, and something turned it on: Elgato's app, or the SmoovPlay
+                    # before this one putting it back as it closed after this one had started (seen: the launcher
+                    # starts the next session a moment before the last one has closed)
+                    _remember_restore(True)
+                    self.log("[capture] something turned the card's own HDR tone mapping back on: off again, for "
+                             "HDR output")
+                else:
+                    self.tone_mapping = tone
+                    self.log(f"[capture] the card's own HDR tone mapping was turned {'on' if tone else 'off'}")
             if s is not None and s.signal:
                 if s.hdr != self.status.hdr:
                     self.log(f"[capture] the console switched to {'HDR' if s.hdr else 'SDR'}")
@@ -254,10 +300,26 @@ class HdrWatch:
                 self.hdr = hdr
                 self.log(f"[capture] the picture is now read as {'HDR10' if hdr else 'SDR'}")
 
-    def _put_back(self) -> None:
-        if self._restore is not None:
-            restore, self._restore = self._restore, None
-            self.card.set_tone_mapping(restore)
+    def _put_back(self, tries: int = 6, wait_s: float = 0.5) -> bool:
+        """The tone mapping back as keep_hdr found it, checked, a few times if the card doesn't take it at once (once
+        it didn't, as a game closed). If it still won't, the note on disk has the next open() put it back."""
+        if self._restore is None:
+            return True
+        for i in range(tries):
+            if i:
+                time.sleep(wait_s)
+            if self.card.set_tone_mapping(self._restore):
+                self._restore = None
+                _forget_restore()
+                self.log("[capture] the card's own HDR tone mapping is back on")
+                return True
+        self.log("[capture] couldn't turn the card's own HDR tone mapping back on: SmoovPlay does it the next time it "
+                 "opens the card, or turn it on in Elgato's app")
+        return False
+
+    def _at_exit(self) -> None:
+        if not self._stop.is_set():  # (close() has had its go, and the note covers the rest)
+            self._put_back()
 
     def close(self) -> None:
         self._stop.set()

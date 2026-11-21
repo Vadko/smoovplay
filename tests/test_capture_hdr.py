@@ -145,12 +145,20 @@ def test_input_register():
     assert elgato.parse_input_status(HDR_BYTES[:8] + b"\x07" + bytes(23)) is None  # not a yes/no
 
 
+@pytest.fixture(autouse=True)
+def restore_note(tmp_path, monkeypatch):
+    """elgato's note of tone mapping to put back, somewhere of the test's own."""
+    note = tmp_path / "elgato-tone-mapping.txt"
+    monkeypatch.setattr(elgato, "RESTORE_NOTE", note)
+    return note
+
+
 class FakeCard:
     """Stands in for elgato.Hd60x: the input statuses given, one per read (the last one stays), and the tone mapping
-    register."""
+    register; `refuse` writes don't take (as one didn't on a real card as a game closed)."""
 
-    def __init__(self, statuses, tone=False):
-        self.statuses, self.tone, self.closed, self.writes = list(statuses), tone, False, []
+    def __init__(self, statuses, tone=False, refuse=0):
+        self.statuses, self.tone, self.closed, self.writes, self.refuse = list(statuses), tone, False, [], refuse
 
     def input_status(self):
         return self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
@@ -160,6 +168,9 @@ class FakeCard:
 
     def set_tone_mapping(self, on):
         self.writes.append(on)
+        if self.refuse:
+            self.refuse -= 1
+            return False
         self.tone = on
         return True
 
@@ -203,6 +214,51 @@ def test_with_the_cards_tone_mapping_on_hdr_comes_as_sdr():
     watch.close()
     assert card.writes == [False, True] and card.tone is True
     assert any("tone mapping is off while SmoovPlay plays" in line for line in logs)
+
+
+def test_tone_mapping_is_put_back_even_when_the_card_doesnt_take_it_at_once(restore_note):
+    card, logs = FakeCard([HDR_ON], tone=True), []
+    watch = elgato.HdrWatch(card, HDR_ON, tone_mapping=True, poll_s=0.005, log=logs.append)
+    assert watch.keep_hdr() and restore_note.read_text() == "1"  # noted before it's changed
+    card.refuse = 2
+    watch._put_back(wait_s=0.01)
+    watch.close()
+    assert card.tone is True and card.writes == [False, True, True, True] and not restore_note.exists()
+    assert "[capture] the card's own HDR tone mapping is back on" in logs
+
+
+def test_a_smoovplay_that_couldnt_put_it_back_is_made_good_next_time(restore_note, monkeypatch):
+    card, logs = FakeCard([HDR_ON], tone=True, refuse=99), []
+    watch = elgato.HdrWatch(card, HDR_ON, tone_mapping=True, poll_s=0.005, log=logs.append)
+    card.refuse = 0
+    assert watch.keep_hdr()
+    card.refuse = 99
+    assert not watch._put_back(tries=2, wait_s=0.01)
+    watch.close()
+    assert card.tone is False and restore_note.read_text() == "1"
+    assert any("couldn't turn the card's own HDR tone mapping back on" in line for line in logs)
+    # the next SmoovPlay to open the card puts it back first
+    card.refuse, card.statuses = 0, [HDR_ON]
+    monkeypatch.setattr(elgato.Hd60x, "open", classmethod(lambda cls: card))
+    later = elgato.HdrWatch.open("Elgato HD60 X", log=logs.append)
+    later.close()
+    assert card.tone is True and not restore_note.exists() and later.tone_mapping is True
+    assert any("as an earlier SmoovPlay left it off" in line for line in logs)
+
+
+def test_tone_mapping_turned_back_on_mid_game_is_turned_off_again(restore_note):
+    """While SmoovPlay keeps it off for HDR output, something turns it on: the SmoovPlay before this one putting it
+    back as it closed a moment after this one started (as happened through the launcher), or Elgato's app. Off
+    again, frames stay HDR10, and it's still put back at close."""
+    card, logs = FakeCard([HDR_ON], tone=True), []
+    watch = elgato.HdrWatch(card, HDR_ON, tone_mapping=True, poll_s=0.005, log=logs.append)
+    assert watch.keep_hdr()
+    card.tone = True
+    wait_until(lambda: card.tone is False)
+    assert watch() is True and card.writes == [False, False] and restore_note.read_text() == "1"
+    watch.close()
+    assert card.tone is True and not restore_note.exists()
+    assert any("off again, for HDR output" in line for line in logs)
 
 
 def test_tone_mapping_turned_on_by_elgatos_app_mid_game():

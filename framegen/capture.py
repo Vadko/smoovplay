@@ -933,9 +933,9 @@ class HdrCardSource(CardSource):
         self._stop = True
         self._go.set()
         self._out_ready.set()
-        self.reader.close()
-        if hasattr(self._hdr_of, "close"):
+        if hasattr(self._hdr_of, "close"):  # first, the card's tone mapping put back while its video still runs
             self._hdr_of.close()
+        self.reader.close()
         if self.container is not None:
             try:
                 self.container.close()
