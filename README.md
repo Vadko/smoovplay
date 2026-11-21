@@ -75,8 +75,8 @@ There's nothing to install on the console, and it's free and open source.
 |---|---|
 | **PS5**, over Remote Play | **Tested** with real games, including ones locked at 30 fps like Gotham Knights. The recommended way. |
 | **NVIDIA GeForce RTX 30, 40 and 50 series** | **Tested** on an RTX 4070 Ti SUPER (Windows 10), and by a contributor on an RTX 5070 Ti (Windows 11). RTX 20 cards and laptops aren't tested yet. |
-| **Any console over HDMI**, through a capture card | *Experimental.* A player's AVerMedia Live Gamer 4K (GC573) works since 0.3.1; its sound came in 0.3.2, waiting on their word. Other cards are tested with recordings standing in for one. |
-| **HDR** from a PS5 | *Experimental.* A contributor has played a real PS5 HDR stream with HDR all the way to an HDR monitor. Since 0.3.2, fullscreen keeps Windows' HDR on. On by itself (Auto, the default) when Windows' HDR is on. |
+| **Any console over HDMI**, through a capture card | *Experimental.* A player's AVerMedia Live Gamer 4K (GC573) works since 0.3.1; its sound came in 0.3.2, waiting on their word. A contributor's Elgato HD60 X works with a PS5, HDR included. Other cards are tested with recordings standing in for one. |
+| **HDR** from a PS5 | *Experimental.* A contributor has played a real PS5 HDR stream with HDR all the way to an HDR monitor, over Remote Play and through an Elgato HD60 X. Since 0.3.2, fullscreen keeps Windows' HDR on. On by itself (Auto, the default) when Windows' HDR is on. |
 | **Xbox and other streaming apps**, by capturing the app's window | *Experimental.* Recognises the current Xbox app since 0.3.1, from a player's report; a real Xbox stream isn't confirmed yet. |
 | **AMD Radeon and Intel Arc**, through DirectML | *Experimental.* The same frames, about 1.7× more slowly. Not on a real card yet. |
 
@@ -203,7 +203,10 @@ The timeline shows 90 fps. At 60 fps there's one AI frame between each pair of r
   HDR stream is fitted to it, and chiaki-ng's codec is left as it is. **On, shown in SDR** always fits HDR to the
   monitor, and **Off** leaves HDR and chiaki-ng's codec alone. A contributor has played a real PS5 HDR stream on an
   HDR monitor, and since 0.3.2 fullscreen keeps Windows' HDR on instead of switching the display to SDR. Instant
-  replay clips are saved in SDR either way.
+  replay clips are saved in SDR either way. Through a capture card, Auto reads an Elgato HD60 X's 10-bit video,
+  as HDR or SDR as the card reports the console's signal, so the console's HDR can stay on or off; a contributor
+  has played a PS5 that way with both. Other cards stay 8-bit on Auto: turn HDR off on the console, or set HDR to
+  On, which reads a card's 10-bit video as HDR, and keep the console's HDR on.
 - **A game locked at 30 fps looks uneven?** Set Settings → Smoothness → **Game frame rate** to **30 fps**. On Auto,
   SmoovPlay works the rate out from the stream as it plays. Since 0.3.4 it goes by the picture and rarely misreads a
   30 fps game over a wired connection, but a still or dark scene can still fool it.
@@ -276,7 +279,9 @@ page after playing.
 As Experimental options. For any console with HDMI, pick **Capture card** on the Play page. For Xbox, pick **App
 window**: SmoovPlay captures the window of the app you stream with (the Xbox app, Sony's PS Remote Play app,
 Moonlight or a cloud game in a browser) and shows the smooth picture over it. A player's AVerMedia Live Gamer 4K
-works; the Xbox app and other cards are waiting on reports, so please [send feedback](#help-test-it).
+and a contributor's Elgato HD60 X work; the Xbox app and other cards are waiting on reports, so please
+[send feedback](#help-test-it). On a PS5, turn off HDCP (Settings → System → HDMI), or the card gets a blank
+picture. For HDR through a card, see **HDR** above.
 
 A capture card is read at 1080p by default. **Capture card resolution** (Settings, Picture) can ask for 1440p or 4K,
 which is sharper on a screen that big, but every new frame is drawn at that size: 1440p is about twice the work of
