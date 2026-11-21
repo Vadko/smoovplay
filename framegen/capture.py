@@ -882,6 +882,8 @@ class HdrCardSource(CardSource):
         console's SDR in HDR output is shown as Windows shows SDR apps (StreamConverter), so it looks as it did when
         the card was read in 8 bits."""
         from .hdr import StreamConverter
+        if out == "pq16" and hasattr(self._hdr_of, "keep_hdr"):  # the card's own HDR-to-SDR off while we play
+            self._hdr_of.keep_hdr()
         self.convert = StreamConverter(out or "sdr8", self.device, display_peak=display_peak, sdr_nits=sdr_nits)
         print("[capture] HDR: " + ("kept HDR for the HDR display" + (
             f"; the console's SDR goes to it as Windows shows SDR apps (white at {sdr_nits:.0f} nits, sRGB)"

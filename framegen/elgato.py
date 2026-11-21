@@ -14,6 +14,12 @@ says "PQ" with SDR video coming in. Register 0x00, the input signal, changes wit
 SDR; all zero for a moment while the console switches (no signal). Found by watching every register while a PS5 turned
 its HDR on and off (HD60 X Rev. 2, firmware 25.07.16). Anything that doesn't look like that is taken as "can't tell".
 
+The card's own HDR tone mapping (register 0x0A, Elgato's SetHDRTonemappingEnabled; on by default, and Elgato's apps
+switch it): while it's on, HDR coming in leaves the card as SDR, BT.709, in every format, P010 too. So a frame is HDR10
+only with HDR coming in and tone mapping off. For HDR output SmoovPlay turns it off while it plays (HdrWatch.keep_hdr)
+and puts it back as it was when it closes: with it off, the card's P010 matched a PS5's Remote Play HDR stream of the
+same screen to about 2 codes in 1023; with it on, read as HDR10 it was a tenth as bright and oversaturated.
+
     python -m framegen.elgato        # what the card says, once a second until Ctrl+C
 """
 from __future__ import annotations
@@ -27,6 +33,7 @@ ELGATO = 0x0FD9
 HD60_X = {0x0082: "HD60 X", 0x008A: "HD60 X Rev. 2"}  # the "new chip" HID protocol (Elgato's IsNewDeviceType)
 MCU = 0x55
 INPUT_STATUS = 0x00
+TONE_MAPPING = 0x0A  # 1: HDR in, SDR out (the card's own tone mapping); 0: HDR10 out
 POLL_S = 0.5
 
 
@@ -135,9 +142,34 @@ class Hd60x:
                 return None
             return bytes(inp[1:1 + n])
 
+    def write(self, register: int, value: int) -> bool:
+        """One byte into an MCU register. Report 6 out: [length, 6 = I2C write, address, 2 bytes written (the
+        register and the value), the register, the value], as Elgato's WriteI2cData sends it."""
+        import ctypes
+        with self._lock:
+            if self._h is None:
+                return False
+            out = (ctypes.c_ubyte * self._out_len)(6, 6, 6, MCU, 2, register, value)
+            return bool(self._hid.HidD_SetOutputReport(self._h, out, self._out_len))
+
     def input_status(self) -> InputStatus | None:
         data = self.read(INPUT_STATUS)
         return parse_input_status(data) if data is not None else None
+
+    def tone_mapping(self) -> bool | None:
+        """Whether the card turns HDR into SDR itself; None if it didn't say."""
+        data = self.read(TONE_MAPPING, 4)
+        return bool(data[0]) if data is not None and data[0] in (0, 1) else None
+
+    def set_tone_mapping(self, on: bool) -> bool:
+        """Turns the card's tone mapping on or off; True once it reads back so."""
+        if not self.write(TONE_MAPPING, 1 if on else 0):
+            return False
+        for _ in range(10):
+            if self.tone_mapping() == on:
+                return True
+            time.sleep(0.05)
+        return False
 
     def close(self) -> None:
         with self._lock:
@@ -147,14 +179,18 @@ class Hd60x:
 
 
 class HdrWatch:
-    """Whether the console sends HDR, kept up to date from the card on a thread (every POLL_S). hdr: the last the
-    card said with a signal coming in (a switch's moment without one changes nothing). Callable: watch() -> bool.
-    open(video device name) -> None unless that's an Elgato HD60 X whose input it can read."""
+    """Whether the card's frames are HDR10, kept up to date from the card on a thread (every POLL_S): HDR coming in
+    and the card's tone mapping off. Callable: watch() -> bool. status: the input as the card last said it with a
+    signal (a switch's moment without one changes nothing); tone_mapping: the card's own HDR-to-SDR, on or off.
+    keep_hdr() turns that off for HDR output, and close() puts it back. open(video device name) -> None unless that's
+    an Elgato HD60 X whose input it can read."""
 
-    def __init__(self, card, first: InputStatus, poll_s: float = POLL_S, log=print) -> None:
+    def __init__(self, card, first: InputStatus, tone_mapping: bool = False, poll_s: float = POLL_S,
+                 log=print) -> None:
         self.card, self.poll_s, self.log = card, poll_s, log
-        self.hdr = first.hdr
-        self.status = first
+        self.status, self.tone_mapping = first, tone_mapping
+        self.hdr = first.hdr and not tone_mapping
+        self._restore: bool | None = None  # the tone mapping to put back at close (keep_hdr changed it)
         self._stop = threading.Event()
         threading.Thread(target=self._run, daemon=True, name="elgato-hdr").start()
 
@@ -168,37 +204,64 @@ class HdrWatch:
             return None
         if card is None:
             return None
-        first = card.input_status()
-        if first is None:  # not the layout this was written for: can't tell
+        first, tone = card.input_status(), card.tone_mapping()
+        if first is None or tone is None:  # not the layout this was written for: can't tell
             card.close()
             return None
-        return cls(card, first, log=log)
+        return cls(card, first, tone, log=log)
 
     def __call__(self) -> bool:
         return self.hdr
 
     def describe(self) -> str:
         s = self.status
-        if not s.signal:
-            return "no signal from the console yet"
-        return f"the console sends {s.w}x{s.h} at {s.fps} Hz in {'HDR' if s.hdr else 'SDR'}"
+        sent = (f"the console sends {s.w}x{s.h} at {s.fps} Hz in {'HDR' if s.hdr else 'SDR'}" if s.signal else
+                "no signal from the console yet")
+        return sent + (", and the card's own HDR tone mapping is on (HDR comes out as SDR)" if self.tone_mapping
+                       else "")
+
+    def keep_hdr(self) -> bool:
+        """For HDR output: the card's tone mapping off, so HDR stays HDR10, until close() puts it back as it was.
+        True when it's off."""
+        if not self.tone_mapping:
+            return True
+        if not self.card.set_tone_mapping(False):
+            self.log("[capture] couldn't turn off the card's own HDR tone mapping: HDR from the console comes as SDR")
+            return False
+        self._restore, self.tone_mapping = True, False
+        import atexit
+        atexit.register(self._put_back)  # also when SmoovPlay ends without closing the source
+        self.hdr = self.status.hdr
+        self.log("[capture] the card's own HDR tone mapping is off while SmoovPlay plays, so the console's HDR stays "
+                 "HDR10 (back on when it closes)")
+        return True
 
     def _run(self) -> None:
         while not self._stop.wait(self.poll_s):
             try:
-                s = self.card.input_status()
+                s, tone = self.card.input_status(), self.card.tone_mapping()
             except Exception:  # noqa: BLE001 - the card went away: keep the last answer
-                s = None
-            if s is None or not s.signal:
                 continue
-            self.status = s
-            if s.hdr != self.hdr:
-                self.hdr = s.hdr
-                self.log(f"[capture] the console switched to {'HDR' if s.hdr else 'SDR'}: the picture is now read as "
-                         f"{'HDR10' if s.hdr else 'SDR'}")
+            if tone is not None and tone != self.tone_mapping:  # (Elgato's app switched it)
+                self.tone_mapping = tone
+                self.log(f"[capture] the card's own HDR tone mapping was turned {'on' if tone else 'off'}")
+            if s is not None and s.signal:
+                if s.hdr != self.status.hdr:
+                    self.log(f"[capture] the console switched to {'HDR' if s.hdr else 'SDR'}")
+                self.status = s
+            hdr = self.status.hdr and not self.tone_mapping
+            if hdr != self.hdr:
+                self.hdr = hdr
+                self.log(f"[capture] the picture is now read as {'HDR10' if hdr else 'SDR'}")
+
+    def _put_back(self) -> None:
+        if self._restore is not None:
+            restore, self._restore = self._restore, None
+            self.card.set_tone_mapping(restore)
 
     def close(self) -> None:
         self._stop.set()
+        self._put_back()
         self.card.close()
 
 

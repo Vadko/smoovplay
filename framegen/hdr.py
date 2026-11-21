@@ -164,8 +164,11 @@ class FrameInfo:
         return cls(bits, fr.color_range == RANGE_FULL, spc, trc, pri, tagged)
 
 
-# A capture card's 10-bit P010 video (framegen/capture.py HdrCardSource): limited range, as HDMI video is, and HDR10
-# or SDR as the console sends it (the card's own colour tags don't change, so its HID says: framegen/elgato.py)
+# A capture card's 10-bit P010 video (framegen/capture.py HdrCardSource), HDR10 or SDR as the card says the console
+# sends it (its colour tags don't change: framegen/elgato.py). Both limited range, as HDMI video is: an Elgato HD60 X's
+# HDR10 matched a PS5's Remote Play HDR stream of the same screen to about 2 codes, and its SDR, shown as Windows
+# shows SDR, matched Remote Play's picture of it (black at 64; white text overshoots past 940 at its edges, but read
+# as full range the picture came out washed out).
 P010_HDR10 = FrameInfo(10, False, SPC_BT2020_NCL, TRC_PQ, PRI_BT2020)
 P010_SDR = FrameInfo(10, False, SPC_BT709, TRC_BT709, PRI_BT709)
 

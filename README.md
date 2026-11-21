@@ -205,7 +205,8 @@ The timeline shows 90 fps. At 60 fps there's one AI frame between each pair of r
   HDR monitor, and since 0.3.2 fullscreen keeps Windows' HDR on instead of switching the display to SDR. Instant
   replay clips are saved in SDR either way. Through a capture card, Auto reads an Elgato HD60 X's 10-bit video,
   as HDR or SDR as the card reports the console's signal, so the console's HDR can stay on or off; a contributor
-  has played a PS5 that way with both. Other cards stay 8-bit on Auto: turn HDR off on the console, or set HDR to
+  has played a PS5 that way with both. For HDR output SmoovPlay turns the card's own HDR-to-SDR tone mapping off
+  while it plays, and back on when it closes. Other cards stay 8-bit on Auto: turn HDR off on the console, or set HDR to
   On, which reads a card's 10-bit video as HDR, and keep the console's HDR on.
 - **A game locked at 30 fps looks uneven?** Set Settings → Smoothness → **Game frame rate** to **30 fps**. On Auto,
   SmoovPlay works the rate out from the stream as it plays. Since 0.3.4 it goes by the picture and rarely misreads a

@@ -105,9 +105,12 @@ SDR, and each read as the other looks wrong (SDR as HDR10: too bright and oversa
 comes from the card: an Elgato HD60 X reports its HDMI input over its vendor HID interface
 ([`framegen/elgato.py`](../framegen/elgato.py), read as in Elgato's MIT sample code). Its documented HDR infoframe
 register keeps the last HDR packet after a PS5 leaves HDR, so the input-signal register (0x00, byte 8) is read
-instead, every half second. `auto` takes the 10-bit video only from such a card; `sdr` and `hdr10` from any card
-that has it at the size asked for, read as HDR10 when the card can't say. Otherwise the card is read in 8 bits as
-before. `python -m framegen.elgato` prints what an HD60 X reports, and `python -m framegen.mf_capture "<card>"` its
+instead, every half second. The HD60 X also tone-maps HDR to SDR itself by default (register 0x0A), in every
+format, so frames are HDR10 only with HDR coming in and that off: for HDR output SmoovPlay turns it off while it
+plays and puts it back when it closes. With it off, the card's P010 matched a PS5's Remote Play HDR stream of the
+same screen to about 2 codes in 1023, and its SDR, shown as Windows shows SDR apps, matched Remote Play's picture
+of it. `auto` takes the 10-bit video only from such a card; `sdr` and `hdr10` from any card that has it at the size asked for, read as HDR10 when the card can't say.
+Otherwise the card is read in 8 bits as before. `python -m framegen.elgato` prints what an HD60 X reports, and `python -m framegen.mf_capture "<card>"` its
 formats as Media Foundation lists them.
 
 Other tools: `scripts/benchmark.py` (GPU timing per model and resolution), `scripts/bench_120.py` (30 → 120 speed
@@ -387,7 +390,8 @@ Timing from a recorded clip, not a live stream, paced at 60 Hz with the OpenGL w
   HDR monitor, and since 0.3.2 fullscreen keeps Windows' HDR on instead of switching the display to SDR. Instant
   replay clips are saved in SDR either way. Through a capture card, Auto reads an Elgato HD60 X's 10-bit video,
   as HDR or SDR as the card reports the console's signal, so the console's HDR can stay on or off; a contributor
-  has played a PS5 that way with both. Other cards stay 8-bit on Auto: turn HDR off on the console, or set HDR to
+  has played a PS5 that way with both. For HDR output SmoovPlay turns the card's own HDR-to-SDR tone mapping off
+  while it plays, and back on when it closes. Other cards stay 8-bit on Auto: turn HDR off on the console, or set HDR to
   On, which reads a card's 10-bit video as HDR, and keep the console's HDR on.
 - **Some wobble.** HUD text over fast motion, very fast camera turns and thin objects crossing each other can wobble
   a little. Press **I** in the video window to compare with frame generation off.

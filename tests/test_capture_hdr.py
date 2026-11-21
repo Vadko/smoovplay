@@ -85,6 +85,14 @@ def test_sdr_red_read_as_sdr_stays_red():
     assert r >= 250 and g <= 3 and b <= 3
 
 
+def test_the_hd60_xs_sdr_is_limited_range():
+    """A PS5 menu through the card in SDR (HD60 X Rev. 2): black at 64, white text overshooting past 940 at its
+    edges. Limited range, as the card tells Windows: read as full range it came out washed out next to the PS5's own
+    Remote Play picture of the same screen."""
+    _, got = run_source([p010(*planes(1023, 512, 512)), p010(*planes(64, 512, 512))], lambda: False)
+    assert got[0][0, 0].tolist() == [255, 255, 255] and got[1][0, 0].tolist() == [0, 0, 0]
+
+
 def test_hdr10_to_hdr_output_is_passed_through():
     codes = (600, 480, 560)
     _, got = run_source([p010(*planes(*codes))], lambda: True, out="pq16")
@@ -138,32 +146,74 @@ def test_input_register():
 
 
 class FakeCard:
-    def __init__(self, statuses):
-        self.statuses, self.closed = list(statuses), False
+    """Stands in for elgato.Hd60x: the input statuses given, one per read (the last one stays), and the tone mapping
+    register."""
+
+    def __init__(self, statuses, tone=False):
+        self.statuses, self.tone, self.closed, self.writes = list(statuses), tone, False, []
 
     def input_status(self):
         return self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
+
+    def tone_mapping(self):
+        return self.tone
+
+    def set_tone_mapping(self, on):
+        self.writes.append(on)
+        self.tone = on
+        return True
 
     def close(self):
         self.closed = True
 
 
-def test_hdr_watch_follows_the_console_through_a_switch():
-    """HDR on, then a moment without a signal (the switch), a read that fails, then SDR: the moment and the failed
-    read change nothing, SDR does, and it's said once."""
-    hdr_on = elgato.InputStatus(3840, 2160, 60, True)
-    sdr = elgato.InputStatus(3840, 2160, 60, False)
-    card, logs = FakeCard([elgato.NO_SIGNAL, None, sdr]), []
-    watch = elgato.HdrWatch(card, hdr_on, poll_s=0.005, log=logs.append)
-    assert watch() is True
-    t_end = time.time() + 2
-    while watch() and time.time() < t_end:
+HDR_ON = elgato.InputStatus(3840, 2160, 60, True)
+SDR_ON = elgato.InputStatus(3840, 2160, 60, False)
+
+
+def wait_until(cond, s=2.0):
+    t_end = time.time() + s
+    while not cond() and time.time() < t_end:
         time.sleep(0.01)
     time.sleep(0.05)
+
+
+def test_hdr_watch_follows_the_console_through_a_switch():
+    """HDR on, then a moment without a signal (the switch), a read that fails, then SDR: the moment and the failed
+    read change nothing, SDR does, and it's said."""
+    card, logs = FakeCard([elgato.NO_SIGNAL, None, SDR_ON]), []
+    watch = elgato.HdrWatch(card, HDR_ON, poll_s=0.005, log=logs.append)
+    assert watch() is True
+    wait_until(lambda: not watch())
     watch.close()
-    assert watch() is False and card.closed
-    assert len(logs) == 1 and "switched to SDR" in logs[0]
+    assert watch() is False and card.closed and card.writes == []
+    assert logs == ["[capture] the console switched to SDR", "[capture] the picture is now read as SDR"]
     assert watch.describe() == "the console sends 3840x2160 at 60 Hz in SDR"
+
+
+def test_with_the_cards_tone_mapping_on_hdr_comes_as_sdr():
+    """The HD60 X's own tone mapping on (its default): HDR coming in leaves the card as SDR, so frames are read as
+    SDR. For HDR output, keep_hdr turns it off (frames HDR10 from then on), and close puts it back as it was."""
+    card, logs = FakeCard([HDR_ON], tone=True), []
+    watch = elgato.HdrWatch(card, HDR_ON, tone_mapping=True, poll_s=0.005, log=logs.append)
+    assert watch() is False and "tone mapping is on" in watch.describe()
+    assert watch.keep_hdr() and watch() is True and card.writes == [False]
+    wait_until(lambda: False, 0.05)
+    assert watch() is True  # (the card reads back off: stays HDR10)
+    watch.close()
+    assert card.writes == [False, True] and card.tone is True
+    assert any("tone mapping is off while SmoovPlay plays" in line for line in logs)
+
+
+def test_tone_mapping_turned_on_by_elgatos_app_mid_game():
+    card, logs = FakeCard([HDR_ON]), []
+    watch = elgato.HdrWatch(card, HDR_ON, poll_s=0.005, log=logs.append)
+    assert watch() is True and watch.keep_hdr() and card.writes == []  # already off: nothing written
+    card.tone = True
+    wait_until(lambda: not watch())
+    watch.close()
+    assert watch() is False and card.writes == []  # not ours to put back
+    assert "[capture] the card's own HDR tone mapping was turned on" in logs
 
 
 def test_only_an_hd60_x_is_asked(monkeypatch):
@@ -199,7 +249,7 @@ class FakeWatch:
     """Stands in for elgato.HdrWatch: the console in SDR."""
 
     def __init__(self):
-        self.closed = False
+        self.closed, self.kept = False, 0
 
     def __call__(self):
         return False
@@ -207,8 +257,22 @@ class FakeWatch:
     def describe(self):
         return "the console sends 3840x2160 at 60 Hz in SDR"
 
+    def keep_hdr(self):
+        self.kept += 1
+        return True
+
     def close(self):
         self.closed = True
+
+
+@pytest.mark.parametrize("out, kept", [("pq16", 1), ("sdr8", 0), (None, 0)])
+def test_hdr_output_turns_the_cards_tone_mapping_off(out, kept):
+    """Only for HDR output: shown in SDR, the card's own HDR-to-SDR is left as the player set it."""
+    watch = FakeWatch()
+    src = c.HdrCardSource(FakeReader([], 8, 4), "Capture card (test)", watch, device="cpu")
+    src.set_hdr(out)
+    src.close()
+    assert watch.kept == kept and watch.closed
 
 
 @pytest.mark.parametrize("setting, says", [("hdr10", False), ("auto", True)])
