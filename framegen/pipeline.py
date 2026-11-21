@@ -287,12 +287,19 @@ class Stats:
         if interp:
             lines.append(f"AI frame time: {np.mean(interp):.1f} ms on average, {np.percentile(interp, 95):.1f} ms "
                          f"for the slowest 5% (a 60 fps frame lasts {budget:.1f} ms)")
-        # Behind, not "took over 16.7 ms": at 90/120 fps the pacer sleeps between a tick's two frames on purpose.
+        due = self.quarter_shown + self.quarter_skipped
+        # 90/120 fps: behind, not "took over 16.7 ms", as the pacer sleeps between a tick's two frames on purpose.
+        # 60 fps: took over 16.7 ms to make (before the screen), not behind. With VSync each frame waits for the
+        # screen's refresh, up to a whole frame however fast the PC is, so "behind" called fast PCs slow.
         n, behind = len(busy), self.behind
-        if n:
+        made = interp + list(self.proc_other_ms)
+        slow = sum(ms > budget for ms in made)
+        if due and n:
             lines.append(f"Running behind: {100 * behind / n:.1f}% of frames ({behind} of {n}) arrived while the PC "
                          "was still busy with earlier ones")
-        due = self.quarter_shown + self.quarter_skipped
+        elif made:
+            lines.append(f"Slow frames: {100 * slow / len(made):.1f}% ({slow} of {len(made)}) took longer to make "
+                         "than a 60 fps frame lasts")
         if due:
             lines.append(f"Extra frames for 90/120 fps: {100 * self.quarter_shown / due:.0f}% shown; the rest fell "
                          "back to 60 fps because the PC was behind")
@@ -330,14 +337,14 @@ class Stats:
         if not interp:
             lines.append("Verdict: frame generation was off, so there's nothing to judge")
         else:
-            late, shown = behind / max(n, 1), self.quarter_shown / due if due else 1.0
+            late, shown = slow / max(len(made), 1), self.quarter_shown / due if due else 1.0
             top = f"{max(rates)} fps"
             lighter = (["a lower output rate"] if max(rates) > 60 else []) + (
                 ["Motion detail: Half"] if full_motion is not False else [])
             either = " or ".join(lighter)
             # At 90 and 120 fps the extra frames say it: a tick that arrives while the PC is still busy only costs
             # something when it has to skip one (a repeat tick waiting a moment loses nothing on screen). At 60 fps
-            # there are no extra frames, so frames that waited are what's left to go by.
+            # there are no extra frames, so frames that took longer to make than a frame lasts are what's left.
             ok, mostly = (shown >= 0.95, shown >= 0.8) if due else (late < 0.01, late < 0.05)
             if ok:
                 lines.append(f"Verdict: this PC keeps up at {top}")

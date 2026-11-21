@@ -18,7 +18,10 @@ class _User32:
     def __init__(self, taken=()):
         self.taken = {(parse(t).mods, parse(t).vk) for t in taken}
         self.on: dict[int, tuple[int, int]] = {}
-        self.queue: list[int] = []
+        self.queue: list = []  # a hotkey's id, or (message, hwnd) for anything else
+        self.filters: list[tuple[int, int]] = []  # each PeekMessageW's (lowest, highest) message
+        self.dispatched: list[int] = []
+        self.quit: list[int] = []
 
     def RegisterHotKey(self, hwnd, i, mods, vk):
         key = (mods & ~hotkeys.NOREPEAT, vk)
@@ -31,10 +34,25 @@ class _User32:
         return 1 if self.on.pop(i, None) else 0
 
     def PeekMessageW(self, msg, hwnd, lo, hi, remove):
+        self.filters.append((lo, hi))
         if not self.queue:
             return 0
-        msg._obj.wParam = self.queue.pop(0)
+        item = self.queue.pop(0)
+        if isinstance(item, tuple):
+            msg._obj.message, msg._obj.hWnd, msg._obj.wParam = item[0], item[1], 0
+        else:
+            msg._obj.message, msg._obj.hWnd, msg._obj.wParam = hotkeys.WM_HOTKEY, None, item
         return 1
+
+    def TranslateMessage(self, msg):
+        return 0
+
+    def DispatchMessageW(self, msg):
+        self.dispatched.append(msg._obj.message)
+        return 0
+
+    def PostQuitMessage(self, code):
+        self.quit.append(code)
 
     def press(self, name):
         c = parse(name) if "+" in name else SimpleNamespace(mods=0, vk=hotkeys.KEYS[name])
@@ -150,6 +168,25 @@ def test_a_message_for_another_id_is_ignored():
     h = Hotkeys(user32=u)
     u.queue.append(42)
     assert h.poll() == []
+
+
+def test_poll_takes_every_message_and_hands_the_rest_to_their_windows():
+    """Looking for WM_HOTKEY alone (a filtered PeekMessage) made Windows call the video window hung after 5 s
+    ("Python is not responding"). Every message is taken; the window's own go to it, as GLFW would send them."""
+    u = _User32()
+    h = Hotkeys(user32=u)
+    u.queue += [(0x0200, 77), 1, (0x000F, 77)]  # a mouse move, Ctrl+Alt+M, a paint
+    assert h.poll() == ["menu"]
+    assert u.dispatched == [0x0200, 0x000F]
+    assert set(u.filters) == {(0, 0)}
+
+
+def test_poll_leaves_quit_to_glfw():
+    u = _User32()
+    h = Hotkeys(user32=u)
+    u.queue += [(hotkeys.WM_QUIT, None), (0x000F, 77)]
+    assert h.poll() == []
+    assert u.quit == [0] and u.dispatched == []  # put back for GLFW, which reads the rest
 
 
 def test_msg_stand_in_works_with_byref():

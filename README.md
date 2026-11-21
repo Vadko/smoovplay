@@ -7,7 +7,7 @@
 
 <p align="center">
   <b>Your console. Your GPU. Smoother gameplay.</b><br>
-  Play 30 fps console games at 60, 90 or up to 120 fps on your PC, with real-time AI frame generation and upscaling.
+  Play 30 fps console games at 60, 90 or up to 120 fps on your PC, with real-time AI frame generation and upscaling on the video your console sends.
 </p>
 
 <p align="center">

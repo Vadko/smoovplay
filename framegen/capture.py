@@ -42,6 +42,10 @@ RAW_RANK = {"nv12": 0, "yuyv422": 1, "uyvy422": 2, "yuv420p": 3, "bgr24": 4, "bg
 COMPRESSED_RANK = {"mjpeg": 10}
 BYTES_PER_PIXEL = {"nv12": 1.5, "yuv420p": 1.5, "yuyv422": 2, "uyvy422": 2, "bgr24": 3, "rgb24": 3, "bgr0": 4}
 CONVERTIBLE = ("nv12", "yuyv422", "uyvy422")  # converted here; anything else raw goes through PyAV's own conversion
+DAMAGED = object()  # a compressed frame the decoder couldn't read: skipped (CardSource._damaged)
+# No frame readable for this long: the card's frames aren't readable at all, and capture stops. Generous, as a stick
+# can send broken frames for a moment while it settles on the signal.
+DAMAGED_GIVE_UP_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -482,6 +486,8 @@ class CardSource:
         self.bt709, self.full_range = (self.h >= 720, range_hint == "pc") if colour == "auto" else colour
         self.info = source_info("capture", hz=self.fps, name=name)
         self.dropped = 0
+        self.damaged = 0  # frames the decoder couldn't read, skipped (_damaged)
+        self._damaged_since: float | None = None  # when the current run of them began
         self._stop = False
         self._go = threading.Event()
         self.q: queue.Queue = queue.Queue(maxsize=queue_size)
@@ -558,33 +564,58 @@ class CardSource:
         return ctx
 
     def _convert_gpu(self, packet):
-        """MJPEG through NVDEC; None (and the CPU from then on) if this card's JPEGs don't go that way."""
+        """MJPEG through NVDEC. Raises when it can't, and _convert asks the CPU whether it's the frame or the GPU."""
         from .chiaki_tap import cuda_frame_to_bgr
-        try:
-            if self._hw is None:
-                self._hw = self._gpu_decoder()
-            frames = self._hw.decode(packet)
-            return cuda_frame_to_bgr(frames[-1]) if frames else None
-        except Exception as e:  # noqa: BLE001 - e.g. 4:2:2 JPEGs the GPU path can't hand over
-            print(f"[capture] MJPEG on the GPU didn't work ({str(e)[:120]}); decoding on the CPU instead")
-            self._gpu_jpeg, self._hw = False, None
+        if self._hw is None:
+            self._hw = self._gpu_decoder()
+        frames = self._hw.decode(packet)
+        return cuda_frame_to_bgr(frames[-1]) if frames else None
+
+    def _convert_cpu(self, packet):
+        frames = self.stream.codec_context.decode(packet)
+        if not frames:
             return None
+        bgr = frames[-1].to_ndarray(format="bgr24")
+        if self.device:
+            import torch
+            return torch.from_numpy(bgr).to(self.device)
+        return bgr
 
     def _convert(self, packet):
+        """The frame in a packet; None when there's none yet, DAMAGED when the decoder can't read it."""
+        import av
         if self._gpu_jpeg:
-            frame = self._convert_gpu(packet)
-            if frame is not None or self._gpu_jpeg:
-                return frame
+            try:
+                return self._convert_gpu(packet)
+            except Exception as e:  # noqa: BLE001 - e.g. 4:2:2 JPEGs the GPU path can't hand over, or a broken frame
+                gpu_error = e
+            try:
+                frame = self._convert_cpu(packet)
+            except av.error.FFmpegError as e:
+                return self._damaged(e)  # the CPU can't read it either: the frame itself, and NVDEC stays on
+            print(f"[capture] MJPEG on the GPU didn't work ({str(gpu_error)[:120]}); decoding on the CPU instead")
+            self._gpu_jpeg, self._hw = False, None
+            return frame
         if not self.raw or self.fmt not in CONVERTIBLE:
-            frames = self.stream.codec_context.decode(packet)
-            if not frames:
-                return None
-            bgr = frames[-1].to_ndarray(format="bgr24")
-            if self.device:
-                import torch
-                return torch.from_numpy(bgr).to(self.device)
-            return bgr
+            try:
+                return self._convert_cpu(packet)
+            except av.error.FFmpegError as e:
+                return self._damaged(e)
         return self._convert_raw(np.frombuffer(packet, dtype=np.uint8))
+
+    def _damaged(self, e: Exception):
+        """A frame the decoder can't read, skipped and counted: cheap cards send the odd broken JPEG, often the first
+        one. Capture stops only when none can be read for DAMAGED_GIVE_UP_S, and says so."""
+        now = time.perf_counter()
+        self.damaged += 1
+        if self.damaged == 1:
+            print(f"[capture] the card sent a damaged {self.fmt.upper()} frame: skipped ({str(e)[:120]})")
+        if self._damaged_since is None:
+            self._damaged_since = now
+        elif now - self._damaged_since >= DAMAGED_GIVE_UP_S:
+            raise RuntimeError(f"none of the card's {self.fmt.upper()} frames could be read for "
+                               f"{DAMAGED_GIVE_UP_S:g} s ({self.damaged} damaged)")
+        return DAMAGED
 
     def _convert_raw(self, data: np.ndarray):
         n = int(self.w * self.h * BYTES_PER_PIXEL[self.fmt])
@@ -616,6 +647,9 @@ class CardSource:
                     now_s = (t_src if t_src is not None else n / self.fps) + 1 / self.fps
                     while self._audio_wait and self._audio_wait[0][0] <= now_s:
                         self._play(self._audio_wait.pop(0)[1])
+                if frame is None:  # a damaged frame, skipped: numbered all the same, as a frame the card sent
+                    n += 1
+                    continue
                 tick = Tick(frame, t_arrival, 0, t_source=t_src, t_ready=time.perf_counter())
                 # Numbered as they come off the card, so a frame dropped from the queue below (the PC behind for a
                 # moment) doesn't shift the count: Game frame rate 30 fps takes every other one as new
@@ -635,8 +669,9 @@ class CardSource:
         self.q.put(None)
 
     def _frames(self):
-        """(frame, arrival time, the source's own time in seconds) for each frame, as it comes. Sound packets on the
-        way go to the player (a file's wait for the picture: _reader)."""
+        """(frame, arrival time, the source's own time in seconds) for each frame, as it comes; the frame is None for
+        a damaged one, which _reader numbers but doesn't send on. Sound packets on the way go to the player (a file's
+        wait for the picture: _reader)."""
         streams = [self.stream] + ([self.astream] if self.astream is not None else [])
         if self.decode_to:
             from av.video.reformatter import ColorRange, Colorspace
@@ -664,7 +699,11 @@ class CardSource:
                 self._sound(packet, t_arrival)
                 continue
             frame = self._convert(packet)
+            if frame is DAMAGED:
+                yield None, t_arrival, None
+                continue
             if frame is not None:
+                self._damaged_since = None
                 t_src = float(packet.pts * packet.time_base) if packet.pts is not None else None
                 if t_src is not None:
                     self._late_v = (self._late_v + [t_arrival - t_src])[-120:]
@@ -780,7 +819,8 @@ class CardSource:
         if self.player is not None:
             self.player.close()
             self._report_sound(final=True)
-        print(f"[capture] dropped frames: {self.dropped}")
+        print(f"[capture] dropped frames: {self.dropped}"
+              + (f", damaged frames from the card skipped: {self.damaged}" if self.damaged else ""))
 
 
 def _cuda_device() -> str | None:

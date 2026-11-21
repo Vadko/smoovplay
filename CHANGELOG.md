@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.3.11
+
+**App window** (Experimental)
+- **No more "Python is not responding" and a black picture after a few seconds**
+  ([#33](https://github.com/smoovplay/smoovplay/issues/33), [#34](https://github.com/smoovplay/smoovplay/issues/34)).
+  SmoovPlay checked for its shortcuts (Ctrl+Alt+M and the rest) in a way that made Windows treat the video window as
+  not responding after 5 seconds. Windows then put a frozen copy of the window on screen, which window capture read
+  back as a black picture, and offered to close SmoovPlay. Thanks to
+  [@KazimeirzOdnowiciel](https://github.com/KazimeirzOdnowiciel) ([#39](https://github.com/smoovplay/smoovplay/pull/39))!
+
+**Capture cards** (Experimental)
+- **A damaged frame from the card no longer stops capture** ([#38](https://github.com/smoovplay/smoovplay/issues/38),
+  [#41](https://github.com/smoovplay/smoovplay/issues/41)). Cards and sticks that send compressed video (MJPEG), as
+  many USB ones do at 1080p 60, sometimes send a frame that can't be read, often right at the start. SmoovPlay
+  stopped capturing at the first one, so the video window closed straight away or never showed a picture. Such frames
+  are now skipped, and the log counts them. If none of the card's frames can be read for 5 seconds, capture stops
+  with a message that says so. With an NVIDIA card, a damaged frame also no longer moves the decoding from the
+  graphics card to the CPU.
+
+**AMD and Intel graphics** (Experimental)
+- **Less CPU use while playing** ([#40](https://github.com/smoovplay/smoovplay/issues/40)). Without an NVIDIA card,
+  part of SmoovPlay's work runs on the CPU every frame, and the threads doing it kept most of the CPU's cores busy
+  between frames while they waited for the next one. They now wait asleep.
+
+**Diagnostics**
+- **The results no longer say the PC is falling behind at 60 fps when it keeps up**
+  ([#20](https://github.com/smoovplay/smoovplay/issues/20)). At 60 fps they counted frames waiting for the screen's
+  next refresh as the PC falling behind, but with VSync every frame waits for it, so a fast PC looked slow. The
+  verdict now goes by how long each frame took to make, and a new line says how many took longer than a 60 fps frame
+  lasts. At 90 and 120 fps it still goes by how many of the extra frames were shown.
+- **A freeze leaves more in the log.** The watchdog notes a stuck video loop after 4 seconds instead of 8, before
+  Windows would call the window not responding, and if Python freezes as a whole, a timer of its own writes where
+  every thread was.
+
 ## 0.3.10
 
 **Capture cards** (Experimental)

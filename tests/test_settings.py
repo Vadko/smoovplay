@@ -73,8 +73,17 @@ def test_results_report_reads_plainly():
     assert "keeps up at 120 fps" in st.results()[-1]
     st.quarter_shown, st.quarter_skipped = 60, 40
     assert "falling behind at 120 fps" in st.results()[-1]
-    st.hz_used, st.quarter_shown, st.quarter_skipped = {60}, 0, 0  # 60 fps: frames that waited are what's left
+    # 60 fps: frames that waited (a quarter here) say nothing, as with VSync each one waits for the screen's refresh
+    # however fast the PC is; frames that took longer to make than a frame lasts do
+    st.hz_used, st.quarter_shown, st.quarter_skipped = {60}, 0, 0
+    assert st.results()[-1] == "Verdict: this PC keeps up at 60 fps"
+    assert "Running behind" not in "\n".join(st.results())
+    st.proc_interp_ms = [8.0] * 90 + [20.0] * 10
+    assert "Slow frames: 10.0% (10 of 100) took longer to make than a 60 fps frame lasts" in "\n".join(st.results())
     assert "falling behind at 60 fps" in st.results()[-1]
+    st.proc_interp_ms, st.proc_other_ms = [8.0] * 97 + [20.0] * 3, [1.0] * 100  # cheap ticks count too: 1.5%
+    assert "mostly keeps up at 60 fps" in st.results()[-1]
+    st.proc_interp_ms, st.proc_other_ms = [8.0] * 100, []
     st.hz_used, st.quarter_shown, st.quarter_skipped = {90}, 0, 0
     st.psnr_interp, st.off_interp, st.off_repeat = [], [], []
     assert any("not measured yet" in line for line in st.results())

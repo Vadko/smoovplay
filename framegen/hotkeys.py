@@ -22,6 +22,7 @@ MODS = {"ctrl": 0x0002, "alt": 0x0001, "shift": 0x0004, "win": 0x0008}  # MOD_CO
 MOD_ORDER = ("Ctrl", "Alt", "Shift", "Win")
 NOREPEAT = 0x4000  # MOD_NOREPEAT: holding the keys down fires once
 WM_HOTKEY = 0x0312
+WM_QUIT = 0x0012
 
 # Key names (as written and shown) -> Windows' virtual-key codes
 KEYS = {"Esc": 0x1B, "Space": 0x20, "Enter": 0x0D, "Backspace": 0x08, "Tab": 0x09, "End": 0x23, "Home": 0x24, "PageUp": 0x21,
@@ -159,14 +160,28 @@ class Hotkeys:
 
     def poll(self) -> list[str]:
         """What was pressed since the last look: actions ("menu") and menu keys ("nav:Up"), in order. Run it before
-        GLFW looks at the messages: these come to the thread, not a window, and GLFW would drop them."""
+        GLFW looks at the messages: these come to the thread, not a window, and GLFW would drop them.
+
+        It takes every message waiting, not only WM_HOTKEY, and hands the rest to their windows as GLFW does
+        (glfw.poll_events then finds the queue empty). Looking for WM_HOTKEY alone (PeekMessage filtered to it) makes
+        Windows call the thread hung after 5 s, however often GLFW looks at the messages after it: Windows then puts
+        a frozen copy of the video window on screen, which window capture reads back as a black picture, and offers
+        to close SmoovPlay ("Python is not responding" after 10 to 20 s, or on a click elsewhere).
+        """
         import ctypes
         from ctypes import wintypes as wt
         out, msg = [], wt.MSG()
-        while self.u32.PeekMessageW(ctypes.byref(msg), None, WM_HOTKEY, WM_HOTKEY, 1):  # PM_REMOVE
-            what = self._ids.get(int(msg.wParam))
-            if what:
-                out.append(what)
+        while self.u32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):  # every message, PM_REMOVE
+            if msg.message == WM_HOTKEY and not msg.hWnd:
+                what = self._ids.get(int(msg.wParam))
+                if what:
+                    out.append(what)
+            elif msg.message == WM_QUIT:  # GLFW's to act on: put back, and leave the rest to it
+                self.u32.PostQuitMessage(int(msg.wParam))
+                break
+            else:
+                self.u32.TranslateMessage(ctypes.byref(msg))
+                self.u32.DispatchMessageW(ctypes.byref(msg))
         return out
 
     def close(self) -> None:
@@ -190,4 +205,8 @@ def _user32():
     u32.RegisterHotKey.argtypes = [wt.HWND, ctypes.c_int, wt.UINT, wt.UINT]
     u32.UnregisterHotKey.argtypes = [wt.HWND, ctypes.c_int]
     u32.PeekMessageW.argtypes = [ctypes.POINTER(wt.MSG), wt.HWND, wt.UINT, wt.UINT, wt.UINT]
+    u32.TranslateMessage.argtypes = [ctypes.POINTER(wt.MSG)]
+    u32.DispatchMessageW.argtypes = [ctypes.POINTER(wt.MSG)]
+    u32.DispatchMessageW.restype = ctypes.c_ssize_t
+    u32.PostQuitMessage.argtypes = [ctypes.c_int]
     return u32

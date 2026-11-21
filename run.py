@@ -51,9 +51,15 @@ if __name__ == "__main__" and "--list-sources" in sys.argv:  # answered before t
 
 import argparse
 import gc
+import os
 import threading
 import time
 from pathlib import Path
+
+# torch's OpenMP threads wait for work asleep instead of spinning. Without CUDA (DirectML) the repeat checks run on the
+# CPU every frame, and threads spinning between them kept most of the CPU's cores busy for the whole session. Set
+# before torch loads, as OpenMP reads it once.
+os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 
 import cv2
 import torch
@@ -70,7 +76,29 @@ from framegen.vfg import vfg_unavailable
 # out (installer/launcher Diagnostics looks for this text), because NVIDIA's licence forbids sharing VFG's results.
 PRIVATE_RESULTS = ("These results include NVIDIA VFG. NVIDIA's licence doesn't allow sharing them, so they stay on "
                    "this PC: Copy diagnostics leaves them out.")
-WATCHDOG_S = 8.0  # the video loop stuck this long while playing: the log gets where each thread is
+# The video loop stuck this long while playing: the log gets where each thread is. Under Windows' 5 s, after which it
+# calls the window "not responding" and the player may close it.
+WATCHDOG_S = 4.0
+STARVED_S = 8.0  # no picture from the source this long: the same, once per stall
+FROZEN_S = 4.0  # Python itself stuck this long (no thread of ours can run, the watchdog included): faulthandler's dump
+
+
+def frozen_dump(on: bool, armed: bool, file=None, after: float = FROZEN_S) -> bool:
+    """The last resort when Python freezes as a whole (a call that never lets go of Python, so the watchdog can't run
+    either): Python's faulthandler writes where every thread is from a timer of its own, `after` seconds from now,
+    unless pushed back by another call. on: arm it, or push it back; else cancel it if `armed`. Returns whether it's
+    armed. Its lines ("Thread 0x... (most recent call first):" and 'File "...", line N in ...') go straight to stderr,
+    so the session log has them even when Windows ends the process; Copy diagnostics masks the user folder in them."""
+    import faulthandler
+    try:
+        if on:
+            faulthandler.dump_traceback_later(after, file=sys.stderr if file is None else file)
+            return True
+        if armed:
+            faulthandler.cancel_dump_traceback_later()
+    except (AttributeError, OSError, RuntimeError, ValueError):  # no stderr with a file descriptor to write to
+        pass
+    return False
 
 
 def _mmss(seconds: float) -> str:
@@ -716,7 +744,8 @@ def main() -> int:
     def watchdog() -> None:
         """If the video loop stops going round while playing (it should several times a second, even with no frames
         coming), or no frame has come for a while, says where every thread is, once per stall, so a freeze or a
-        black screen in the log says what it was stuck on."""
+        black screen in the log says what it was stuck on. While the loop goes round it keeps pushing back
+        frozen_dump's timer, which goes off only if Python freezes as a whole and this thread can't run either."""
         import traceback
         home = str(Path.home())
 
@@ -730,24 +759,28 @@ def main() -> int:
                 lines += ["    " + s.rstrip().replace("\n", "\n    ") for s in traceback.format_stack(frame)[-12:]]
             print("\n".join(lines).replace(home, "~"), flush=True)  # (no user name in Copy diagnostics)
 
-        stuck = starved = False
+        stuck = starved = armed = False
         while not stop_results.wait(1.0):
             pipe_ = live[0]
             age = time.perf_counter() - pipe_.beat if pipe_ is not None else 0.0
             w = pipe_.waiting if pipe_ is not None else None
+            # Only while playing (a TensorRT build between sessions may hold Python on purpose), and not once this
+            # thread has seen the loop stuck: it says where everything is itself, below
+            armed = frozen_dump(pipe_ is not None and age < WATCHDOG_S, armed)
             if age >= WATCHDOG_S and not stuck:
                 stuck = True
                 where(f"[watchdog] the video loop hasn't moved for {age:.0f} s.")
             elif age < WATCHDOG_S and stuck:
                 stuck = False
                 print("[watchdog] the video loop is going again", flush=True)
-            if w is not None and w.since >= WATCHDOG_S and not starved:
+            if w is not None and w.since >= STARVED_S and not starved:
                 starved = True
                 why = w.why.replace("\n", " ")
                 where(f"[watchdog] no picture from {w.what} for {w.since:.0f} s" + (f" ({why})." if why else "."))
             elif w is None and starved:
                 starved = False
                 print("[watchdog] pictures again", flush=True)
+        frozen_dump(False, armed)
 
     if sink.sinks:
         threading.Thread(target=watchdog, name="watchdog", daemon=True).start()

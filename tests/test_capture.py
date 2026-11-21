@@ -266,6 +266,80 @@ def test_mjpeg_falls_back_to_the_cpu_when_the_gpu_cant(tmp_path, monkeypatch, ca
     assert np.abs(ticks[0].frame.numpy().astype(int) - frames[0]).mean() < 6
 
 
+def _mjpeg_file(tmp_path, frames, damage=()):
+    """An MJPEG AVI standing in for a card's stream, with the frames numbered in `damage` broken (every byte zero),
+    as a cheap card can send: FFmpeg's decoder can't read them."""
+    h, w = frames[0].shape[:2]
+    path = tmp_path / "card.avi"
+    out = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 60, (w, h))
+    for f in frames:
+        out.write(f)
+    out.release()
+    buf = bytearray(path.read_bytes())
+    jpegs, i = [], buf.find(b"00dc")
+    while i >= 0:  # each frame's chunk: "00dc", its size, then the JPEG (the index at the end names them too)
+        if buf[i + 8:i + 10] == b"\xff\xd8":
+            jpegs.append((i + 8, int.from_bytes(buf[i + 4:i + 8], "little")))
+        i = buf.find(b"00dc", i + 4)
+    assert len(jpegs) == len(frames)
+    for k in damage:
+        start, size = jpegs[k]
+        buf[start:start + size] = bytes(size)
+    path.write_bytes(buf)
+    return str(path)
+
+
+def _frames_of(src):
+    from framegen.io import Waiting
+    ticks = [t for t in src if not isinstance(t, Waiting)]
+    src.close()
+    return ticks
+
+
+def test_a_damaged_mjpeg_frame_is_skipped_and_capture_goes_on(tmp_path, capsys):
+    """A cheap card's broken JPEG (often the first one) ended capture before a single frame was shown."""
+    import av
+    frames = [_blocks(seed=s)[0] for s in (40, 41, 42, 43)]
+    src = c.CardSource(av.open(_mjpeg_file(tmp_path, frames, damage=(0, 2))), "an MJPEG card", live=False,
+                       device="cpu")
+    ticks = _frames_of(src)
+    out = capsys.readouterr().out
+    assert [t.extra["seq"] for t in ticks] == [1, 3]  # numbered as the card sent them, the broken ones too
+    assert np.abs(ticks[0].frame.numpy().astype(int) - frames[1]).mean() < 6
+    assert src.damaged == 2 and "stopped" not in out
+    assert out.count("the card sent a damaged MJPEG frame: skipped") == 1  # said once; the count comes at the end
+    assert "dropped frames: 0, damaged frames from the card skipped: 2" in out
+
+
+@pytest.mark.parametrize("damaged, seqs", [(0, [1, 2]), (1, [0, 2])])  # the first frame, as a USB stick sent one
+def test_on_the_gpu_a_damaged_frame_doesnt_send_mjpeg_to_the_cpu(tmp_path, monkeypatch, capsys, damaged, seqs):
+    import av
+    frames = [_blocks(seed=s)[0] for s in (44, 45, 46)]
+    src = c.CardSource(av.open(_mjpeg_file(tmp_path, frames, damage=(damaged,))), "an MJPEG card", live=False,
+                       device="cpu")
+    src._gpu_jpeg = True  # as on a PC with CUDA, where NVDEC is tried first
+    nvdec = av.CodecContext.create("mjpeg", "r")  # standing in for NVDEC, which can't read a broken frame either
+
+    def gpu(self, packet):
+        decoded = nvdec.decode(packet)
+        return torch.from_numpy(decoded[-1].to_ndarray(format="bgr24")) if decoded else None
+    monkeypatch.setattr(c.CardSource, "_convert_gpu", gpu)
+    ticks = _frames_of(src)
+    assert [t.extra["seq"] for t in ticks] == seqs
+    assert src._gpu_jpeg and src.damaged == 1  # the CPU couldn't read it either: the frame, so NVDEC stays on
+    assert "decoding on the CPU instead" not in capsys.readouterr().out
+
+
+def test_capture_stops_saying_why_when_no_frame_can_be_read(tmp_path, monkeypatch, capsys):
+    import av
+    monkeypatch.setattr(c, "DAMAGED_GIVE_UP_S", 0.03)
+    frames = [_blocks(seed=s)[0] for s in range(50, 60)]
+    src = c.CardSource(av.open(_mjpeg_file(tmp_path, frames, damage=range(10))), "an MJPEG card", live=False,
+                       device="cpu")
+    assert _frames_of(src) == []
+    assert "[capture] stopped: none of the card's MJPEG frames could be read for 0.03 s" in capsys.readouterr().out
+
+
 def test_frames_keep_the_cards_numbers_when_the_queue_drops_some(tmp_path):
     """A frame dropped from the queue (the PC behind for a moment) leaves a gap in the numbers rather than shifting
     them: Game frame rate 30 fps counts by them (cadence.RhythmLock), and a shift made its beat move, a hitch."""
