@@ -357,7 +357,7 @@ Timing from a recorded clip, not a live stream, paced at 60 Hz with the OpenGL w
 - **HDR is Experimental.** A contributor has played a real PS5 HDR stream with HDR output on an HDR monitor
   (Windows 11, RTX 5070 Ti). The tests use a stand-in HDR stream (`frametap_fake.py --hdr`) and read back the 10-bit
   buffer HDR output presents (on an SDR display, with `FRAMEGEN_HDR_FORCE=1`). Through a capture card, a contributor
-  has played a PS5 with its HDR on and off through an Elgato HD60 X; other cards with 10-bit video are read as HDR10
+  has tried a PS5 with its HDR on and off through an Elgato HD60 X; other cards with 10-bit video are read as HDR10
   only with HDR set to On, untried. Window capture stays SDR.
 - **4K** input doesn't fit in real time, even with TensorRT.
 - **90/120 Hz to a file** (`--out`) isn't supported; those rates are window-only.
@@ -390,7 +390,7 @@ Timing from a recorded clip, not a live stream, paced at 60 Hz with the OpenGL w
   HDR monitor, and since 0.3.2 fullscreen keeps Windows' HDR on instead of switching the display to SDR. Instant
   replay clips are saved in SDR either way. Through a capture card, Auto reads an Elgato HD60 X's 10-bit video,
   as HDR or SDR as the card reports the console's signal, so the console's HDR can stay on or off; a contributor
-  has played a PS5 that way with both. For HDR output SmoovPlay turns the card's own HDR-to-SDR tone mapping off
+  has tried a PS5 that way with both. For HDR output SmoovPlay turns the card's own HDR-to-SDR tone mapping off
   while it plays, and back on when it closes. Other cards stay 8-bit on Auto: turn HDR off on the console, or set HDR to
   On, which reads a card's 10-bit video as HDR, and keep the console's HDR on.
 - **Some wobble.** HUD text over fast motion, very fast camera turns and thin objects crossing each other can wobble

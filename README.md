@@ -76,7 +76,7 @@ There's nothing to install on the console, and it's free and open source.
 | **PS5**, over Remote Play | **Tested** with real games, including ones locked at 30 fps like Gotham Knights. The recommended way. |
 | **NVIDIA GeForce RTX 30, 40 and 50 series** | **Tested** on an RTX 4070 Ti SUPER (Windows 10), and by a contributor on an RTX 5070 Ti (Windows 11). RTX 20 cards and laptops aren't tested yet. |
 | **Any console over HDMI**, through a capture card | *Experimental.* A player's AVerMedia Live Gamer 4K (GC573) works since 0.3.1; its sound came in 0.3.2, waiting on their word. A contributor's Elgato HD60 X works with a PS5, HDR included. Other cards are tested with recordings standing in for one. |
-| **HDR** from a PS5 | *Experimental.* A contributor has played a real PS5 HDR stream with HDR all the way to an HDR monitor, over Remote Play and through an Elgato HD60 X. Since 0.3.2, fullscreen keeps Windows' HDR on. On by itself (Auto, the default) when Windows' HDR is on. |
+| **HDR** from a PS5 | *Experimental.* A contributor has played a real PS5 HDR stream with HDR all the way to an HDR monitor over Remote Play, and tried it through an Elgato HD60 X. Since 0.3.2, fullscreen keeps Windows' HDR on. On by itself (Auto, the default) when Windows' HDR is on. |
 | **Xbox and other streaming apps**, by capturing the app's window | *Experimental.* Recognises the current Xbox app since 0.3.1, from a player's report; a real Xbox stream isn't confirmed yet. |
 | **AMD Radeon and Intel Arc**, through DirectML | *Experimental.* The same frames, about 1.7× more slowly. Not on a real card yet. |
 
@@ -205,7 +205,7 @@ The timeline shows 90 fps. At 60 fps there's one AI frame between each pair of r
   HDR monitor, and since 0.3.2 fullscreen keeps Windows' HDR on instead of switching the display to SDR. Instant
   replay clips are saved in SDR either way. Through a capture card, Auto reads an Elgato HD60 X's 10-bit video,
   as HDR or SDR as the card reports the console's signal, so the console's HDR can stay on or off; a contributor
-  has played a PS5 that way with both. For HDR output SmoovPlay turns the card's own HDR-to-SDR tone mapping off
+  has tried a PS5 that way with both. For HDR output SmoovPlay turns the card's own HDR-to-SDR tone mapping off
   while it plays, and back on when it closes. Other cards stay 8-bit on Auto: turn HDR off on the console, or set HDR to
   On, which reads a card's 10-bit video as HDR, and keep the console's HDR on.
 - **A game locked at 30 fps looks uneven?** Set Settings → Smoothness → **Game frame rate** to **30 fps**. On Auto,
